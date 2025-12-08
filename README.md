@@ -1,16 +1,140 @@
-# React + Vite
+# Personal Healthcare Assistant  
+### Daily Activity Monitoring System Based on First-Person Hand–Object Interaction
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+---
 
-Currently, two official plugins are available:
+## 1. 프로젝트 개요
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+본 프로젝트는 **1인칭 시점(First-Person View)**에서 촬영된 영상 정보를 기반으로 사용자의 일상 행동을 자동으로 기록·분석하고, 이를 통해 **예방적 개인 헬스케어 관리**를 지원하는 시스템이다.
 
-## React Compiler
+기존 헬스케어 AI 연구가 특정 환자군이나 제한된 환경에 집중되어 있다는 한계를 인식하고, 본 프로젝트는 **건강한 일반 사용자의 일상 생활**에서 자연스럽게 발생하는 행동(수분 섭취, 학습 활동 등)을 지속적으로 기록하고 시각화하는 것을 목표로 한다.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+특히 본 README에서는 **전체 시스템 중 UI(프론트엔드) 구현과 사용자 인터랙션 흐름**에 초점을 맞추어 설명한다.
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## 2. 시스템 전체 구조 요약
+
+본 시스템은 다음과 같은 **4단계 파이프라인**을 기반으로 한다.
+
+### ① On-device 실시간 감지
+- **YOLOv8**을 이용한 객체 인식 (What)
+- **MediaPipe**를 이용한 손 동작 추적 (How)
+
+### ② Trigger 기반 캡처
+- 의미 있는 행동 시작/종료 시점만 선택적으로 이미지 캡처
+
+### ③ 행동 분류 및 로그 기록
+- 객체 종류 + 손 동작 패턴 + 지속시간을 조합한 **규칙 기반 행동 분류**
+- **CSV 로그 형태로 저장**
+
+### ④ 데이터 분석 및 시각화(UI)
+- 일 / 주 / 월 단위 활동 요약
+- 목표 대비 달성도, 패턴 분석, 히스토리 제공
+
+> 본 README는 **4단계(Data Analysis & Reporting)**의 UI 구현 결과물을 중심으로 설명한다.
+
+---
+
+## 3. 주요 UI 구성 및 기능 설명
+
+### 3.1 Dashboard (메인 화면)
+
+Dashboard는 사용자의 하루 상태를 **직관적으로 요약**하는 역할을 한다.
+
+#### 주요 기능
+- **오늘의 목표 달성 현황**
+  - 수분 섭취량 vs 목표치
+  - 학습 시간 vs 목표치
+- **Balance Score**
+  - 수분 / 학습 지표를 결합한 종합 점수
+- **날씨 정보 표시**
+  - 외부 환경 요인을 고려한 사용자 맥락 제공
+- **AI Daily Summary 버튼**
+  - 사용자가 버튼을 클릭한 경우에만 AI 요약 생성
+  - 자동 호출을 방지하여 비용 및 과도한 개입을 제한
+
+> Dashboard는 **“오늘 하루를 한눈에 파악하는 요약 UI”**를 목표로 설계되었다.
+
+---
+
+### 3.2 Study Activity UI (Book / Laptop)
+
+학습 활동은 **Book(독서)** 과 **Laptop(노트북 학습)** 두 유형으로 구분된다.
+
+#### 공통 특징
+- **한 CSV 파일 = 한 학습 세션**
+- 세션 단위로 시간 계산 및 기록
+- **타임라인 기반 시각화** 제공
+
+---
+
+### 3.2.1 Laptop Study 화면
+
+Laptop Study 화면은 **디지털 학습 행동을 구조적으로 분류·분석**하는 UI이다.
+
+#### 기능 구성
+- **오늘의 활동 요약**
+  - 전체 학습 시간
+  - 공부 활동 / 기타 활동 구분
+- **카테고리 분포 도넛 차트**
+  - Lecture / Assignment / Coding / 기타 활동 비율 시각화
+  - 단일 카테고리만 존재하는 경우에도 도넛 차트가 정상 표시되도록 처리
+- **공부 타임라인**
+  - 시간대별 활동 분포 표시
+- **활동 기록 리스트**
+  - 세션별 수정 기능 제공
+
+#### UI 설계 원칙
+- Book 활동과 동일한 상태 관리 패턴 적용
+- 활동 수정 모달 종료 시 상태 초기화 (`setSelectedLog(null)`)
+- 불필요한 블러 효과 제거 → **시각적 일관성 유지**
+
+---
+
+## 3.3 Water Intake UI
+
+Water UI는 사용자의 **수분 섭취 행동을 시간 기반으로 기록**한다.
+
+- CSV 파일 병합을 통한 일일 로그 구성
+- 섭취 횟수 → 섭취량(ml) 변환
+- 타임라인 및 누적 섭취량 표시
+
+학습 기록과 **분리된 독립 UI**이지만,  
+종합 점수 및 히스토리 계산에는 **통합 반영**된다.
+
+---
+
+## 3.4 Profile 화면
+
+Profile은 사용자의 **중·장기 행동 패턴을 확인하는 분석 화면**이다.
+
+#### 주요 구성
+- **Recent History**
+  - 최근 n일간의 종합 점수 기록
+- **Monthly Tracker**
+  - 월간 달력 형태의 활동 시각화
+  - 데이터가 없는 날짜는 표시되지 않도록 처리
+- **History 일관성 보장**
+  - 일일 점수와 히스토리 점수가 동일한 데이터 소스를 기준으로 계산되도록 수정
+
+> Profile UI는 **“기록의 축적과 행동 패턴 인식”**에 초점을 둔다.
+
+---
+
+## 4. UI 설계의 연구적 의미
+
+본 프로젝트의 UI는 단순한 시각화가 아니라 다음 연구 방향을 반영한다.
+
+- 행동 기반 헬스 지표의 가시화
+- 환자군이 아닌 **일반 사용자 대상 예방적 관리**
+- 웨어러블의 한계를 보완하는 **시각 정보 중심 인터페이스**
+- 사용자의 맥락(시간, 날씨, 활동 패턴)을 고려한 정보 구조화
+
+---
+
+## 5. 정리
+
+본 UI 구현은  
+**First-Person Hand–Object Interaction 기반 행동 인식 결과를  
+사용자가 이해하고 행동 개선으로 이어갈 수 있도록 연결하는 인터페이스**를 목표로 한다.
