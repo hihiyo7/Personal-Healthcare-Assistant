@@ -117,7 +117,18 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
   }, [currentDate, currentUser, stats.waterMl, studySummary, aiLoading, bookLogs, laptopLogs]);
 
   // ─────────────────────────────────────────────
-  // 백엔드에서 로그 불러오기 (AI Summary 호출 제거됨)
+  // 날짜 변경 시 상태 초기화
+  // ─────────────────────────────────────────────
+  useEffect(() => {
+    // 날짜가 변경되면 이전 날짜의 상태를 명시적으로 초기화
+    setLogs([]);
+    setStats({ waterMl: 0, studyMin: 0, calories: 0 });
+    setDrinkCount(0);
+    setAiSummary(null);
+    setLoading(false);
+    setAiLoading(false);
+  }, [currentDate]);
+
   // ─────────────────────────────────────────────
   const loadLogs = useCallback(async () => {
     if (!currentUser) return;
@@ -139,12 +150,13 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
       setStats({ waterMl, studyMin: 0, calories: 0 });
       setDrinkCount(drinks);
 
-      // 히스토리 업데이트 - CSV 데이터가 있는 경우에만
-      // water CSV가 있거나, study CSV가 있는 경우에만 히스토리에 기록
+      // 히스토리 업데이트 - 실제 CSV 데이터가 있는 경우에만
+      // water CSV가 존재하거나 study logs가 있을 때만 히스토리에 기록
       const studyMinutes = studySummary?.totalStudyMin || 0;
       const hasWaterData = formatted.length > 0;
-      const hasStudyData = studySummary?.hasServerData === true;
+      const hasStudyData = (bookLogs && bookLogs.length > 0) || (laptopLogs && laptopLogs.length > 0);
       
+      // ✅ Update history if EITHER water OR study data exists (safe props, no infinite loop)
       if (onHistoryUpdate && (hasWaterData || hasStudyData)) {
         onHistoryUpdate(currentDate, waterMl, drinks, studyMinutes);
       }

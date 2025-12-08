@@ -86,40 +86,21 @@ class SummaryRequest(BaseModel):
     laptopInfo: Optional[LaptopInfo] = None
 
 
-# ==========================================
-# 유틸리티 함수
-# ==========================================
 def get_csv_files_for_date(prefix: str, date_str: str) -> list:
     """
-    특정 날짜에 해당하는 모든 CSV 파일 찾기
-    
-    지원하는 파일명 형식:
-    1. water_log_2025-12-04-20-44.csv (날짜-시간 연결)
-    2. study_log_2025-12-04-21-30.csv
-    3. water_2025-12-04_20-44.csv (언더스코어 구분)
-    4. water_log_2025-12-04.csv (기존 형식)
+    prefix(water/study) + 날짜가 파일명에 포함된 모든 CSV 파일 검색
+    예:
+    - water_log_2025-12-04-20-44.csv
+    - study_2025-12-04_09-12-30.csv
     """
-    files = []
-    
-    # 형식 1: prefix_log_2025-12-04-*.csv (새 형식 - 날짜와 시간이 -로 연결)
-    pattern1 = os.path.join(LOGS_DIR, f"{prefix}_log_{date_str}-*.csv")
-    files.extend(glob.glob(pattern1))
-    
-    # 형식 2: prefix_2025-12-04_*.csv (언더스코어 구분)
-    pattern2 = os.path.join(LOGS_DIR, f"{prefix}_{date_str}_*.csv")
-    files.extend(glob.glob(pattern2))
-    
-    # 형식 3: prefix_2025-12-04*.csv (날짜 뒤에 바로 이어짐)
-    pattern3 = os.path.join(LOGS_DIR, f"{prefix}_{date_str}*.csv")
-    files.extend(glob.glob(pattern3))
-    
-    # 형식 4: 기존 형식 (prefix_log_2025-12-04.csv)
-    old_pattern = os.path.join(LOGS_DIR, f"{prefix}_log_{date_str}.csv")
-    if os.path.exists(old_pattern):
-        files.append(old_pattern)
-    
-    # 중복 제거
+    pattern = os.path.join(LOGS_DIR, f"{prefix}*{date_str}*.csv")
+    files = glob.glob(pattern)
+
+    print(f"[DEBUG] glob pattern: {pattern}")
+    print(f"[DEBUG] found files: {files}")
+
     return list(set(files))
+
 
 
 def parse_timestamp_from_filename(filename: str) -> str:

@@ -35,7 +35,7 @@ export default function LaptopModal({ isOpen, log, onSave, onClose, isDarkMode }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div className={`relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-3xl shadow-2xl ${modalBg}`} onClick={e => e.stopPropagation()}>
         {/* 헤더 */}
         <div className={`sticky top-0 z-10 p-6 pb-4 border-b ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-100 bg-white'}`}>

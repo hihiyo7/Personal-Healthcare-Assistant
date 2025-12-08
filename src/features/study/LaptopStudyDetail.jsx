@@ -302,19 +302,22 @@ export default function LaptopStudyDetail({ logs = [], onUpdateLog, onBack, isDa
             카테고리 분포
           </h2>
 
-          {categoryData.length > 0 ? (
-            <div className="flex-1 min-h-[200px]">
-              <ResponsiveContainer width="100%" height={200}>
+          {categoryData && categoryData.length > 0 ? (
+            <div className="flex-1 w-full flex items-center justify-center" style={{ minHeight: '220px' }}>
+              <ResponsiveContainer width="100%" height={220}>
                 <RechartsPie>
                   <Pie
                     data={categoryData}
                     cx="50%"
                     cy="50%"
+                    startAngle={0}
+                    endAngle={360}
                     outerRadius={60}
                     innerRadius={30}
                     dataKey="value"
                     label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
                     labelLine={{ strokeWidth: 1 }}
+                    isAnimationActive={true}
                   >
                     {categoryData.map((entry, idx) => (
                       <Cell
@@ -640,7 +643,7 @@ export default function LaptopStudyDetail({ logs = [], onUpdateLog, onBack, isDa
         isOpen={showModal}
         log={selectedLog}
         onSave={handleModalSave}
-        onClose={() => setShowModal(false)}
+        onClose={() => { setShowModal(false); setSelectedLog(null); }}
         isDarkMode={isDarkMode}
       />
     </div>
