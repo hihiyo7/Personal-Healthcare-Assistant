@@ -6,6 +6,7 @@
 # ============================================================
 
 import os
+from dotenv import load_dotenv
 import glob
 import pandas as pd
 from typing import Optional, List
@@ -20,14 +21,19 @@ from datetime import datetime
 # ==========================================
 # Gemini API 설정
 # ==========================================
-# 사용자 제공 키 (주의: 배포 시 환경변수로 관리)
-GOOGLE_API_KEY = "AIzaSyC0fvUfFwpIw0mKuKxJpNN_wEJU_LGnQzw"
+# Load environment from a .env file (if present) so local development works
+load_dotenv()
+
+# 사용자 제공 키 (환경변수로 관리). 에러 메시지는 명확하게 전달.
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    raise RuntimeError("Missing required environment variable: GOOGLE_API_KEY. Set it in your environment or in a local .env file.")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # ==========================================
 # 데이터 경로 설정
 # ==========================================
-DATA_DIR = r"C:\Users\gaeun\Desktop"
+DATA_DIR = os.environ.get("DATA_DIR", r"C:\Users\gaeun\Desktop")
 LOGS_DIR = os.path.join(DATA_DIR, "logs")
 CAPTURES_DIR = os.path.join(DATA_DIR, "captures")
 
