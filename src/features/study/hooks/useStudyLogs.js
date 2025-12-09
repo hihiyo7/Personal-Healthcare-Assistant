@@ -1,16 +1,17 @@
-// src/hooks/useStudyLogs.js
+// src/features/study/hooks/useStudyLogs.js
 // ============================================================
 // Study 로그 관리 커스텀 훅 (서버 연동 + LocalStorage 지속성)
+// 수정: 날짜 변경 직후 Stale Data(이전 데이터)가 계산되는 현상 차단
 // ============================================================
 
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { fetchStudyLogs as fetchStudyLogsAPI } from '../../../shared/services/apiService';
 import { 
   processBookLog, 
   processLaptopLog, 
-  updateBookLogWithInfo,
-  updateBookLogPages,
-  updateLaptopLogCategory,
+  updateBookLogWithInfo, 
+  updateBookLogPages, 
+  updateLaptopLogCategory, 
   filterLogsByDate
 } from '../utils/processStudyLog';
 import { isStudyCategory } from '../utils/studyCalculator';
@@ -27,28 +28,36 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
   const [serverTotalLaptopMin, setServerTotalLaptopMin] = useState(0);
   const [serverSessions, setServerSessions] = useState([]);
 
+  // ✅ 현재 보고 있는 날짜를 추적하기 위한 Ref (비동기 방어 및 Stale Data 방지용)
+  const currentDateRef = useRef(currentDate);
+
   // LocalStorage Key (날짜별 저장)
   const getStorageKey = (date) => `studyLogs_${date}`;
 
   // ─────────────────────────────────────────────
   // 로그 로드 (Server + LocalStorage Merge)
   // ─────────────────────────────────────────────
-  const loadStudyLogs = useCallback(async (date) => {
+  const loadStudyLogs = useCallback(async (fetchDate) => {
     setLoading(true);
     setError(null);
     
     try {
-      console.log('[useStudyLogs] Loading logs for:', date);
+      console.log(`[useStudyLogs] Loading logs for: ${fetchDate}`);
       
-      // 1. 서버에서 원본 데이터 로드
-      const serverResponse = await fetchStudyLogsAPI(date);
+      const serverResponse = await fetchStudyLogsAPI(fetchDate);
+
+      // 비동기 응답 후, 사용자가 이미 다른 날짜로 이동했다면 무시
+      if (fetchDate !== currentDateRef.current) {
+        console.log(`[useStudyLogs] Date changed during fetch. Ignored ${fetchDate}.`);
+        return;
+      }
+
       const { logs: serverData, totalBookMin, totalLaptopMin, sessions } = serverResponse;
       
       setServerTotalBookMin(totalBookMin || 0);
       setServerTotalLaptopMin(totalLaptopMin || 0);
       setServerSessions(sessions || []);
       
-      // 2. 서버 데이터 포맷팅
       const processedServerLogs = (serverData || []).map(row => ({
         id: row.id,
         type: row.type || 'laptop',
@@ -66,29 +75,22 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
         sourceFile: row.source_file || ''
       }));
 
-      // 3. LocalStorage 확인 (사용자 수정 사항) - 서버에 데이터가 있을 때만 적용
+      // LocalStorage 확인
       let finalLogs = processedServerLogs;
-      
       if (processedServerLogs.length > 0) {
-        // 서버에 데이터가 있는 경우에만 LocalStorage 확인
-        const savedLogs = localStorage.getItem(getStorageKey(date));
+        const savedLogs = localStorage.getItem(getStorageKey(fetchDate));
         if (savedLogs) {
           try {
             const localLogs = JSON.parse(savedLogs);
-            // 로컬 데이터가 존재하고, 서버 데이터와 ID가 매칭되면 로컬 수정사항 적용
             if (localLogs.length > 0) {
-              // 서버 데이터 기반으로 로컬 수정사항 병합
               finalLogs = processedServerLogs.map(serverLog => {
                 const localLog = localLogs.find(l => l.id === serverLog.id);
                 if (localLog) {
-                  // 로컬에서 수정된 필드 모두 적용 (Laptop + Book 필드)
                   return {
                     ...serverLog,
-                    // Laptop 필드
                     category: localLog.category || serverLog.category,
                     subject: localLog.subject || serverLog.subject,
                     note: localLog.note || serverLog.note,
-                    // Book 필드
                     bookId: localLog.bookId || serverLog.bookId,
                     bookTitle: localLog.bookTitle || serverLog.bookTitle,
                     bookAuthors: localLog.bookAuthors || serverLog.bookAuthors,
@@ -102,16 +104,13 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
                 }
                 return serverLog;
               });
-              console.log('[useStudyLogs] Merged with LocalStorage edits');
             }
           } catch (e) {
             console.error('Error parsing local logs', e);
           }
         }
       } else {
-        // 서버에 데이터가 없으면 해당 날짜의 LocalStorage도 클리어
-        localStorage.removeItem(getStorageKey(date));
-        console.log('[useStudyLogs] No server data for', date, '- cleared LocalStorage');
+        localStorage.removeItem(getStorageKey(fetchDate));
       }
       
       setStudyLogs(finalLogs);
@@ -120,23 +119,30 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
         onLogsLoaded(finalLogs);
       }
     } catch (err) {
+      if (fetchDate !== currentDateRef.current) return;
       console.error('Study logs load error:', err);
       setError(err.message);
       setStudyLogs([]);
     } finally {
-      setLoading(false);
+      if (fetchDate === currentDateRef.current) {
+        setLoading(false);
+      }
     }
   }, [onLogsLoaded]);
 
   useEffect(() => {
+    // 날짜 변경 시 Ref 업데이트 및 상태 즉시 초기화
+    currentDateRef.current = currentDate;
+    
+    setStudyLogs([]);
+    setServerTotalBookMin(0);
+    setServerTotalLaptopMin(0);
+
     if (currentDate) {
       loadStudyLogs(currentDate);
     }
   }, [currentDate, loadStudyLogs]);
 
-  // ─────────────────────────────────────────────
-  // 로그 변경 시 LocalStorage 저장
-  // ─────────────────────────────────────────────
   useEffect(() => {
     if (currentDate && studyLogs.length > 0) {
       localStorage.setItem(getStorageKey(currentDate), JSON.stringify(studyLogs));
@@ -145,8 +151,10 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
 
 
   // ─────────────────────────────────────────────
-  // Memoized Values
+  // Memoized Values (수정: 날짜 불일치 시 0 리턴)
   // ─────────────────────────────────────────────
+  const isDateStale = currentDate !== currentDateRef.current; // 현재 렌더링 날짜 vs Ref 날짜 비교
+
   const bookLogs = useMemo(() => 
     studyLogs.filter(log => log.type === 'book').map(processBookLog),
     [studyLogs]
@@ -160,21 +168,21 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
   const todayBookLogs = useMemo(() => filterLogsByDate(bookLogs, currentDate), [bookLogs, currentDate]);
   const todayLaptopLogs = useMemo(() => filterLogsByDate(laptopLogs, currentDate), [laptopLogs, currentDate]);
 
-  // 카테고리별 시간 계산 (사용자 수정 반영)
-  // 세션 기반으로 계산 (동일 sourceFile = 하나의 세션)
+  // 카테고리별 시간 계산
   const { totalLaptopStudyMin, totalLaptopNonStudyMin } = useMemo(() => {
-    // sourceFile별로 그룹핑
+    // ✅ [핵심 수정] 렌더링 중인 날짜(currentDate)가 아직 Ref에 반영되지 않았다면(useEffect 실행 전)
+    // 데이터는 이전 날짜의 것이므로 계산 결과를 0으로 강제합니다.
+    if (currentDate !== currentDateRef.current) {
+      return { totalLaptopStudyMin: 0, totalLaptopNonStudyMin: 0 };
+    }
+
     const groups = {};
     laptopLogs.forEach(log => {
       const key = log.sourceFile || 'unknown';
       if (!groups[key]) {
-        groups[key] = {
-          logs: [],
-          category: log.category || 'lecture'
-        };
+        groups[key] = { logs: [], category: log.category || 'lecture' };
       }
       groups[key].logs.push(log);
-      // 카테고리는 가장 최근 수정된 값 사용
       groups[key].category = log.category || 'lecture';
     });
 
@@ -190,7 +198,6 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
 
       if (sorted.length === 0) return;
 
-      // 세션 시간 계산 (첫 로그 ~ 마지막 로그)
       const firstTime = sorted[0].timestamp || sorted[0].time || '';
       const lastTime = sorted[sorted.length - 1].timestamp || sorted[sorted.length - 1].time || '';
       
@@ -207,7 +214,6 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
       const endMin = extractMinutes(lastTime);
       const duration = Math.max(endMin - startMin, 1);
 
-      // 카테고리가 study인지 확인
       if (isStudyCategory(group.category)) {
         studyMin += duration;
       } else {
@@ -219,9 +225,10 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
       totalLaptopStudyMin: studyMin, 
       totalLaptopNonStudyMin: nonStudyMin 
     };
-  }, [laptopLogs]);
+  }, [laptopLogs, currentDate]); // currentDate를 의존성에 포함
 
-  const totalBookMin = serverTotalBookMin;
+  // ✅ [핵심 수정] BookMin 역시 날짜가 안 맞으면 0 처리
+  const totalBookMin = (currentDate !== currentDateRef.current) ? 0 : serverTotalBookMin;
   const totalStudyMin = totalBookMin + totalLaptopStudyMin;
 
   // ─────────────────────────────────────────────
@@ -229,42 +236,34 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
   // ─────────────────────────────────────────────
   const updateBookWithInfo = useCallback((logId, bookInfo) => {
     setStudyLogs(prev => prev.map(log => {
-      if (log.id === logId && log.type === 'book') {
-        return updateBookLogWithInfo(log, bookInfo);
-      }
+      if (log.id === logId && log.type === 'book') return updateBookLogWithInfo(log, bookInfo);
       return log;
     }));
   }, []);
 
   const updateBookPages = useCallback((logId, readPages) => {
     setStudyLogs(prev => prev.map(log => {
-      if (log.id === logId && log.type === 'book') {
-        return updateBookLogPages(log, readPages);
-      }
+      if (log.id === logId && log.type === 'book') return updateBookLogPages(log, readPages);
       return log;
     }));
   }, []);
 
   const updateBookLog = useCallback((logId, updates) => {
     setStudyLogs(prev => prev.map(log => {
-      if (log.id === logId && log.type === 'book') {
-        return { ...log, ...updates };
-      }
+      if (log.id === logId && log.type === 'book') return { ...log, ...updates };
       return log;
     }));
   }, []);
 
   const updateLaptopLog = useCallback((logId, updates) => {
     setStudyLogs(prev => prev.map(log => {
-      if (log.id === logId && log.type === 'laptop') {
-        return updateLaptopLogCategory(log, updates);
-      }
+      if (log.id === logId && log.type === 'laptop') return updateLaptopLogCategory(log, updates);
       return log;
     }));
   }, []);
 
-  // CSV 데이터가 실제로 있는지 여부 (서버에서 로그를 받았는지)
-  const hasServerData = studyLogs.length > 0;
+  // CSV 데이터 존재 여부 (Stale 상태면 false 처리)
+  const hasServerData = (currentDate === currentDateRef.current) && studyLogs.length > 0;
 
   return {
     studyLogs,
@@ -281,7 +280,7 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
     totalStudyMin,
     
     sessions: serverSessions,
-    hasServerData,  // CSV 데이터 존재 여부
+    hasServerData,
     
     loadStudyLogs,
     updateBookWithInfo,

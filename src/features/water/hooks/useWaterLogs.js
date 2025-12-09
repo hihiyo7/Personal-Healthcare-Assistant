@@ -1,8 +1,8 @@
 // src/hooks/useWaterLogs.js
 // 물 마시기 로그 관리 커스텀 훅
-// - AI Summary는 버튼 클릭 시에만 호출
+// 수정: 무한 루프 방지 (currentUser 의존성 제거) 및 비동기 날짜 꼬임 방지
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchWaterLogs, analyzeDrinkImage, generateAISummary } from '../../../shared/services/apiService';
 import { formatWaterLogs, calculateLogStats, updateLogEntry } from '../utils/logProcessor';
 
@@ -13,6 +13,15 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
   const [aiSummary, setAiSummary] = useState(null);  // 초기값 null (버튼 클릭 전)
   const [aiLoading, setAiLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // ✅ [수정] 날짜 변경 추적 및 User 참조용 Ref (무한 루프 방지 핵심)
+  const currentDateRef = useRef(currentDate);
+  const currentUserRef = useRef(currentUser);
+
+  // currentUser가 바뀔 때마다 ref 업데이트 (리렌더링 트리거 X)
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
 
   // ─────────────────────────────────────────────
   // AI Summary 생성 (버튼 클릭 시에만 호출)
@@ -120,7 +129,9 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
   // 날짜 변경 시 상태 초기화
   // ─────────────────────────────────────────────
   useEffect(() => {
-    // 날짜가 변경되면 이전 날짜의 상태를 명시적으로 초기화
+    // 날짜가 변경되면 이전 날짜의 상태를 명시적으로 초기화하고 Ref 업데이트
+    currentDateRef.current = currentDate;
+    
     setLogs([]);
     setStats({ waterMl: 0, studyMin: 0, calories: 0 });
     setDrinkCount(0);
@@ -131,13 +142,24 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
 
   // ─────────────────────────────────────────────
   const loadLogs = useCallback(async () => {
-    if (!currentUser) return;
+    // ✅ [수정] Ref를 사용하여 최신 currentUser 확인 (의존성 배열 제거 목적)
+    if (!currentUserRef.current) return;
+
+    // ✅ 요청 시작 시점의 날짜 고정
+    const fetchDate = currentDate;
 
     try {
       setLoading(true);
       setAiSummary(null);  // 날짜 변경 시 AI Summary 초기화
       
-      const rawLogs = await fetchWaterLogs(currentDate);
+      const rawLogs = await fetchWaterLogs(fetchDate);
+      
+      // ✅ [수정] 비동기 응답 후, 날짜가 바뀌었다면 중단 (버그 수정 핵심)
+      if (fetchDate !== currentDateRef.current) {
+        console.log(`[useWaterLogs] Date changed during fetch. Ignored ${fetchDate}.`);
+        return;
+      }
+      
       console.log('[useWaterLogs] Raw logs from server:', rawLogs);
       
       const formatted = formatWaterLogs(rawLogs);
@@ -151,32 +173,36 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
       setDrinkCount(drinks);
 
       // 히스토리 업데이트 - 실제 CSV 데이터가 있는 경우에만
-      // water CSV가 존재하거나 study logs가 있을 때만 히스토리에 기록
       const studyMinutes = studySummary?.totalStudyMin || 0;
       const hasWaterData = formatted.length > 0;
       const hasStudyData = (bookLogs && bookLogs.length > 0) || (laptopLogs && laptopLogs.length > 0);
       
-      // ✅ Update history if EITHER water OR study data exists (safe props, no infinite loop)
+      // ✅ [수정] currentDate가 아닌 고정된 fetchDate 사용
       if (onHistoryUpdate && (hasWaterData || hasStudyData)) {
-        onHistoryUpdate(currentDate, waterMl, drinks, studyMinutes);
+        onHistoryUpdate(fetchDate, waterMl, drinks, studyMinutes);
       }
       
-      // ❌ AI Summary 자동 호출 제거됨
-      // fetchAISummary는 버튼 클릭 시에만 호출
-      
     } catch (err) {
+      // 에러 발생 시에도 날짜가 바뀌었으면 무시
+      if (fetchDate !== currentDateRef.current) return;
       console.error(err);
     } finally {
-      setLoading(false);
+      // 로딩 해제 시에도 날짜 체크
+      if (fetchDate === currentDateRef.current) {
+        setLoading(false);
+      }
     }
-  }, [currentDate, currentUser, onHistoryUpdate]);
+    // ⚠️ [수정] currentUser를 의존성에서 제거하여 무한 루프 차단
+  }, [currentDate, onHistoryUpdate, studySummary, bookLogs, laptopLogs]);
 
   // 날짜 변경 시 자동 로드 (AI Summary 제외)
   useEffect(() => {
     loadLogs();
   }, [loadLogs]);
 
-  // 이미지 분석
+  // ─────────────────────────────────────────────
+  // 이미지 분석 (기존 코드 유지)
+  // ─────────────────────────────────────────────
   const handleImageAnalysis = async (logId, imageFile) => {
     if (!imageFile) {
       alert("분석할 이미지가 없습니다.");
@@ -222,6 +248,9 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
     }
   };
 
+  // ─────────────────────────────────────────────
+  // 수동 로그 수정 (기존 코드 유지)
+  // ─────────────────────────────────────────────
   const handleManualLogUpdate = (logId, newTime, newAmount, newAiResult) => {
     const updatedLogs = updateLogEntry(logs, logId, {
       time: newTime,
@@ -236,6 +265,9 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
     setDrinkCount(drinks);
   };
 
+  // ─────────────────────────────────────────────
+  // 로그 초기화 (기존 코드 유지)
+  // ─────────────────────────────────────────────
   const clearLogs = () => {
     setLogs([]);
     setStats({ waterMl: 0, studyMin: 0, calories: 0 });

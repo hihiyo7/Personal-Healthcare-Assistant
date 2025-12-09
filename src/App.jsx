@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Utensils } from 'lucide-react';
 
 // ====== 커스텀 훅 (Feature-based path) ======
@@ -58,9 +58,7 @@ export default function App() {
   } = useAuth();
 
   // ─────────────────────────────────────────────
-  // 화면 상태 (view 확장)
-  // - dashboard, detail-water, detail-study, detail-food, profile
-  // - detail-study-book, detail-study-laptop (신규)
+  // 화면 상태
   // ─────────────────────────────────────────────
   const [view, setView] = useState(() => {
     if (!localStorage.getItem('currentUser')) return 'login';
@@ -74,21 +72,21 @@ export default function App() {
   const [showAchievement, setShowAchievement] = useState(false);
 
   // ─────────────────────────────────────────────
-  // 히스토리 업데이트 콜백 (study 시간은 별도로 업데이트)
+  // 히스토리 업데이트 콜백 (중복 방지 강화)
   // ─────────────────────────────────────────────
   const handleHistoryUpdate = useCallback((date, totalWater, drinks, studyMinutes = 0) => {
     if (!currentUser) return;
-    // 실제 기록(물 또는 공부)이 없으면 히스토리를 만들지 않는다.
+    
+    // 빈 데이터 업데이트 방지 (선택 사항)
     if ((totalWater || 0) === 0 && (studyMinutes || 0) === 0) return;
 
     const waterGoal = currentUser.goals?.water || 2000;
     const studyGoal = currentUser.goals?.study || 300;
     
-    // 물 + 공부 통합 점수 계산 (Infinity 방지 로직 적용된 함수 사용)
     const combinedScore = calculateOverallScore(totalWater, waterGoal, studyMinutes, studyGoal);
 
     const newEntry = {
-      date: date,
+      date: date, // ✅ 인자로 넘어온 date 사용 (currentDate 사용 금지)
       score: combinedScore,
       water: totalWater,
       study: studyMinutes,
@@ -96,15 +94,37 @@ export default function App() {
       feedback: `물 ${totalWater}ml, 공부 ${studyMinutes}분`
     };
 
-    const newHistory = updateHistoryEntry(currentUser.history, newEntry);
+    // ✅ 중복 방지 로직: 이미 해당 날짜가 있으면 덮어쓰고, 없으면 추가
+    let updatedHistory = currentUser.history ? [...currentUser.history] : [];
+    const existingIndex = updatedHistory.findIndex(h => h.date === date);
+
+    if (existingIndex !== -1) {
+      // 기존 데이터와 비교하여 변경점이 없으면 리턴 (무한 루프 방지 2차 방어선)
+      const existing = updatedHistory[existingIndex];
+      if (
+        existing.water === newEntry.water &&
+        existing.study === newEntry.study &&
+        existing.score === newEntry.score
+      ) {
+        return; 
+      }
+
+      updatedHistory[existingIndex] = {
+        ...existing,
+        ...newEntry
+      };
+    } else {
+      updatedHistory.push(newEntry);
+    }
     
-    if (JSON.stringify(currentUser.history) !== JSON.stringify(newHistory)) {
-      updateHistory(newHistory);
+    // 실제 변경이 있을 때만 updateHistory 호출
+    if (JSON.stringify(currentUser.history) !== JSON.stringify(updatedHistory)) {
+      updateHistory(updatedHistory);
     }
   }, [currentUser, updateHistory]);
 
   // ─────────────────────────────────────────────
-  // Study 로그 훅 사용 (먼저 호출 - AI Summary에 필요)
+  // Study 로그 훅 사용
   // ─────────────────────────────────────────────
   const {
     bookLogs,
@@ -115,25 +135,25 @@ export default function App() {
     totalBookMin,
     totalLaptopStudyMin,
     totalLaptopNonStudyMin,
-    hasServerData: hasStudyData,  // CSV 데이터 존재 여부
+    hasServerData: hasStudyData,
     updateBookLog,
     updateLaptopLog,
     updateBookWithInfo,
     updateBookPages
   } = useStudyLogs(currentDate);
 
-  // Study Summary 객체 (AI Summary용)
-  const studySummary = {
+  // ✅ [수정] studySummary를 useMemo로 감싸서 참조값 변경으로 인한 무한 루프 방지
+  const studySummary = useMemo(() => ({
     totalStudyMin,
     totalBookMin,
     totalLaptopMin: totalLaptopStudyMin,
     totalLaptopStudyMin,
     totalLaptopNonStudyMin,
-    hasServerData: hasStudyData  // CSV 데이터 존재 여부 전달
-  };
+    hasServerData: hasStudyData
+  }), [totalStudyMin, totalBookMin, totalLaptopStudyMin, totalLaptopNonStudyMin, hasStudyData]);
 
   // ─────────────────────────────────────────────
-  // 물 로그 훅 사용 (studySummary 이후에 호출)
+  // 물 로그 훅 사용
   // ─────────────────────────────────────────────
   const {
     logs,
@@ -157,53 +177,35 @@ export default function App() {
   }, [view, currentDate]);
 
   // ─────────────────────────────────────────────
-  // 로그인 핸들러 (with 화면 전환)
+  // 로그인/회원가입/로그아웃 등 핸들러
   // ─────────────────────────────────────────────
   const onLogin = (id, pw) => {
     const success = handleLogin(id, pw);
-    if (success) {
-      setView("dashboard");
-    } else {
-      alert("로그인 실패");
-    }
+    if (success) setView("dashboard");
+    else alert("로그인 실패");
   };
 
-  // ─────────────────────────────────────────────
-  // 회원가입 핸들러
-  // ─────────────────────────────────────────────
   const onSignup = (name, id, pw) => {
     const result = handleSignup(name, id, pw);
     alert(result.message);
     return result.success;
   };
 
-  // ─────────────────────────────────────────────
-  // 로그아웃 핸들러 (with 화면 전환)
-  // ─────────────────────────────────────────────
   const onLogout = () => {
     handleLogout();
     setView("login");
   };
 
-  // ─────────────────────────────────────────────
-  // 로고 클릭 → 오늘 대시보드로
-  // ─────────────────────────────────────────────
   const handleLogoClick = () => {
     setCurrentDate(new Date().toISOString().split("T")[0]);
     setView("dashboard");
   };
 
-  // ─────────────────────────────────────────────
-  // 목표 수정 (with Toast)
-  // ─────────────────────────────────────────────
   const onUpdateGoals = (newGoals) => {
     handleUpdateGoals(newGoals);
     showToast("목표가 수정되었습니다", "success");
   };
 
-  // ─────────────────────────────────────────────
-  // 기록 삭제 (with 확인)
-  // ─────────────────────────────────────────────
   const onDeleteHistory = (date) => {
     if (!window.confirm(`${date} 기록을 초기화하시겠습니까?`)) return;
     handleDeleteHistory(date);
@@ -211,32 +213,20 @@ export default function App() {
     showToast("기록이 초기화되었습니다", "success");
   };
 
-  // ─────────────────────────────────────────────
-  // 히스토리 로드 (날짜 클릭 시)
-  // ─────────────────────────────────────────────
   const handleLoadHistory = (date) => {
     setCurrentDate(date);
     setView("dashboard");
   };
 
-  // ─────────────────────────────────────────────
-  // 프로필 업데이트 (with Toast)
-  // ─────────────────────────────────────────────
   const onUpdateProfile = (updates) => {
     handleUpdateProfile(updates);
     showToast("프로필이 업데이트되었습니다", "success");
   };
 
-  // ─────────────────────────────────────────────
-  // CSV 업로드 (자동 동기화 모드에서는 비활성화)
-  // ─────────────────────────────────────────────
   const handleFileUpload = () => {
     alert("자동 동기화 모드입니다. CSV 업로드는 필요하지 않습니다.");
   };
 
-  // ─────────────────────────────────────────────
-  // Summary Builder (챗봇용)
-  // ─────────────────────────────────────────────
   const getSummary = (period) => {
     return buildHydrationSummary(period, {
       currentUser,
@@ -246,16 +236,9 @@ export default function App() {
     });
   };
 
-  // ─────────────────────────────────────────────
-  // Study 카테고리 선택 핸들러
-  // ─────────────────────────────────────────────
   const handleSelectStudyCategory = (category) => {
-    if (category === 'book') {
-      setView('detail-study-book');
-    } else if (category === 'laptop') {
-      setView('detail-study-laptop');
-    }
-    // pen은 잠금 상태이므로 무시
+    if (category === 'book') setView('detail-study-book');
+    else if (category === 'laptop') setView('detail-study-laptop');
   };
 
   // ============================================================
@@ -269,7 +252,6 @@ export default function App() {
           : "bg-slate-50 text-slate-800"
       }`}
     >
-      {/* 다크 모드 배경 효과 */}
       <div
         className={`fixed top-0 left-0 w-full h-full pointer-events-none z-0 transition-opacity duration-500 ${
           isDarkMode
@@ -280,9 +262,6 @@ export default function App() {
 
       <div className="relative z-10">
         {view === "login" ? (
-          // ─────────────────────────────────────────────
-          // 로그인 화면
-          // ─────────────────────────────────────────────
           <Login
             onLogin={onLogin}
             onSignup={onSignup}
@@ -291,9 +270,6 @@ export default function App() {
           />
         ) : (
           <>
-            {/* ─────────────────────────────────────────────
-                상단 네비게이션바
-            ───────────────────────────────────────────── */}
             <NavBar
               user={currentUser}
               setView={setView}
@@ -304,11 +280,7 @@ export default function App() {
               toggleTheme={toggleTheme}
             />
 
-            {/* ─────────────────────────────────────────────
-                메인 페이지 컨테이너
-            ───────────────────────────────────────────── */}
             <div className="max-w-6xl mx-auto p-6 pb-20">
-              {/* DASHBOARD */}
               {view === "dashboard" && (
                 <Dashboard
                   user={currentUser}
@@ -328,7 +300,6 @@ export default function App() {
                 />
               )}
 
-              {/* WATER DETAIL */}
               {view === "detail-water" && (
                 <WaterDetail
                   logs={logs}
@@ -341,7 +312,6 @@ export default function App() {
                 />
               )}
 
-              {/* STUDY CATEGORY 선택 화면 */}
               {view === "detail-study" && (
                 <StudyCategory
                   isDarkMode={isDarkMode}
@@ -353,7 +323,6 @@ export default function App() {
                 />
               )}
 
-              {/* BOOK STUDY DETAIL */}
               {view === "detail-study-book" && (
                 <BookStudyDetail
                   logs={bookLogs}
@@ -363,7 +332,6 @@ export default function App() {
                 />
               )}
 
-              {/* LAPTOP STUDY DETAIL */}
               {view === "detail-study-laptop" && (
                 <LaptopStudyDetail
                   logs={laptopLogs}
@@ -373,7 +341,6 @@ export default function App() {
                 />
               )}
 
-              {/* FOOD */}
               {view === "detail-food" && (
                 <ComingSoon
                   title="Meals & Calories"
@@ -382,7 +349,6 @@ export default function App() {
                 />
               )}
 
-              {/* PROFILE */}
               {view === "profile" && (
                 <Profile
                   user={currentUser}
@@ -391,15 +357,12 @@ export default function App() {
                   onDeleteHistory={onDeleteHistory}
                   onLogout={onLogout}
                   onUpdateProfile={onUpdateProfile}
-                  onUpdateHistory={updateHistory} // onUpdateHistory prop 전달
+                  onUpdateHistory={updateHistory}
                   isDarkMode={isDarkMode}
                 />
               )}
             </div>
 
-            {/* ─────────────────────────────────────────────
-                챗봇 + 업적 팝업
-            ───────────────────────────────────────────── */}
             <ChatBot
               user={currentUser}
               stats={stats}
@@ -417,9 +380,6 @@ export default function App() {
           </>
         )}
 
-        {/* ─────────────────────────────────────────────
-            전역 Toast 알림
-        ───────────────────────────────────────────── */}
         {toast && (
           <Toast
             message={toast.message}
