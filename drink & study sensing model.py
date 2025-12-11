@@ -1,5 +1,5 @@
 import cv2
-from ultralytics import YOLO
+from ultralytics import YOLOWorld
 import mediapipe as mp
 import numpy as np
 import pandas as pd
@@ -7,10 +7,27 @@ from datetime import datetime
 import os
 from collections import deque
 import math
-import uuid  # 파일명 중복 방지를 위한 UUID
+import uuid
+import sys
 
-# YOLO 모델 로드
-yolo_model = YOLO("yolov8n.pt")
+# =========================================================
+# [설정] 카메라 및 모델
+# =========================================================
+CAMERA_SOURCE = 1
+
+print("YOLO-World 모델 로딩 중...")
+yolo_model = YOLOWorld("yolov8s-worldv2.pt")
+
+CUSTOM_CLASSES = [
+    "cup", "mug", "water bottle", "glass", "coffee cup",
+    "open book", "closed book", "textbook", "notebook", "journal",
+    "laptop", "keyboard", "computer mouse", "tablet", "monitor",
+    "pen", "pencil", "marker", "highlighter",
+    "paper", "document", "notepad", "calculator"
+]
+
+yolo_model.set_classes(CUSTOM_CLASSES)
+print(f"✓ {len(CUSTOM_CLASSES)}개 클래스 로드 완료")
 
 # MediaPipe 설정
 mp_hands = mp.solutions.hands
@@ -22,91 +39,226 @@ hands = mp_hands.Hands(
     min_tracking_confidence=0.5
 )
 
-# ------------------ [설정] 물 마시기 ------------------
-CUP_CLASS_ID = 41
-BOTTLE_CLASS_ID = 39
-DRINKING_OBJECTS = [CUP_CLASS_ID, BOTTLE_CLASS_ID]
+# =========================================================
+# [클래스 매핑]
+# =========================================================
+DRINKING_CLASSES = ["cup", "mug", "water bottle", "glass", "coffee cup"]
 
-CONTACT_FRAMES = 6
-DRINKING_FRAMES = 10
-MOVE_THRESHOLD = 4.0
+STUDY_BOOK_CLASSES = ["open book", "closed book", "textbook", "notebook", "journal"]
+STUDY_DEVICE_CLASSES = ["laptop", "keyboard", "tablet", "monitor"]
+STUDY_TOOL_CLASSES = ["pen", "pencil", "marker", "paper", "document", "notepad", "calculator"]
 
-MIN_TOTAL_MOVEMENT = 60
-MOVEMENT_CONSISTENCY_THRESHOLD = 0.65
+ALL_STUDY_CLASSES = STUDY_BOOK_CLASSES + STUDY_DEVICE_CLASSES + STUDY_TOOL_CLASSES
 
-MISSING_CUP_TOLERANCE = 40
-MISSING_HAND_TOLERANCE = 15
-PROXIMITY_DISTANCE = 120
-MIN_CUP_SIZE_RATIO = 0.03
-DRINKING_MIN_CONFIDENCE = 0.50
-DRINKING_MIN_ASPECT_RATIO = 1.2
+# ------------------ [파라미터] 물 마시기 ------------------
+WATER_CONTACT_FRAMES = 8
+WATER_TRACKING_FRAMES = 40
+MIN_TOTAL_RISE = 40
+MOVEMENT_CONSISTENCY = 0.50
+GESTURE_CONFIDENCE = 0.10
 
-# ------------------ [설정] 공부 감지 ------------------
-BOOK_CLASS_ID = 84
-LAPTOP_CLASS_ID = 73
-KEYBOARD_CLASS_ID = 76
-STUDY_OBJECTS = [BOOK_CLASS_ID, LAPTOP_CLASS_ID, KEYBOARD_CLASS_ID]
+WATER_PROXIMITY_DISTANCE = 20
+MISSING_HAND_TOLERANCE = 20  # ★ 이 프레임만큼 손 복원 시도
+MIN_OBJECT_SIZE_RATIO = 0.02
+DRINKING_MIN_CONFIDENCE = 0.35
+DRINKING_MIN_ASPECT_RATIO = 1.0
 
-STUDY_MIN_CONFIDENCE = 0.40
-STUDY_PROXIMITY_DISTANCE = 150
+DRINKING_COOLDOWN = 90
 
-STUDY_MIN_START_FRAMES = 90  # 약 3초 유지 시 시작
-STUDY_MIN_SESSION_FRAMES = 150  # 최소 공부 시간 (약 5초)
-STUDY_TIMEOUT_FRAMES = 150  # 세션 유지 쿨타임 (약 5초)
+IOU_THRESHOLD = 0.5
+MAX_TRACKING_FRAMES = 30
 
-STUDY_MISSING_OBJECT_TOLERANCE = 60
-STUDY_MISSING_HAND_TOLERANCE = 30
+# ------------------ [파라미터] 공부 감지 ------------------
+STUDY_MIN_CONFIDENCE = 0.30
+STUDY_PROXIMITY_DISTANCE = 20
+STUDY_MIN_START_FRAMES = 90
+STUDY_AWAY_FRAMES = 120
+STUDY_MIN_SESSION_FRAMES = 150
 
-# 공부 상태 관리 변수
-study_state = "idle"
-study_start_counter = 0
-study_total_frames = 0
-study_cooldown_counter = 0
-study_last_object = "unknown"
 
-last_study_box = None
-last_study_class = None
-study_object_missing_frames = 0
+# =========================================================
+# [Kalman Filter 클래스]
+# =========================================================
 
-# ----------------------------------------------------------
+class KalmanFilter2D:
+    """2D 위치 추적을 위한 Kalman Filter"""
 
-# 디렉토리 생성
+    def __init__(self):
+        # 상태 벡터: [x, y, vx, vy] (위치 + 속도)
+        self.kalman = cv2.KalmanFilter(4, 2)
+
+        # 상태 전이 행렬 (등속도 모델)
+        self.kalman.transitionMatrix = np.array([
+            [1, 0, 1, 0],  # x = x + vx
+            [0, 1, 0, 1],  # y = y + vy
+            [0, 0, 1, 0],  # vx = vx
+            [0, 0, 0, 1]  # vy = vy
+        ], dtype=np.float32)
+
+        # 측정 행렬 (x, y만 측정)
+        self.kalman.measurementMatrix = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0]
+        ], dtype=np.float32)
+
+        # 프로세스 노이즈
+        self.kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+
+        # 측정 노이즈
+        self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.1
+
+        # 초기화 플래그
+        self.initialized = False
+
+    def update(self, x, y):
+        """실제 측정값으로 업데이트"""
+        measurement = np.array([[x], [y]], dtype=np.float32)
+
+        if not self.initialized:
+            # 첫 프레임: 상태 초기화
+            self.kalman.statePre = np.array([[x], [y], [0], [0]], dtype=np.float32)
+            self.kalman.statePost = np.array([[x], [y], [0], [0]], dtype=np.float32)
+            self.initialized = True
+            return x, y
+
+        # 예측 + 보정
+        self.kalman.correct(measurement)
+        prediction = self.kalman.predict()
+
+        return float(prediction[0]), float(prediction[1])
+
+    def predict(self):
+        """측정값 없이 예측만 수행 (손 사라졌을 때)"""
+        if not self.initialized:
+            return None, None
+
+        prediction = self.kalman.predict()
+        return float(prediction[0]), float(prediction[1])
+
+    def reset(self):
+        """필터 리셋"""
+        self.initialized = False
+
+
+# =========================================================
+# 초기화
+# =========================================================
 os.makedirs("logs", exist_ok=True)
 os.makedirs("captures", exist_ok=True)
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(CAMERA_SOURCE)
 
-# 물 마시기 변수들
-contact_counter = 0
-drinking_counter = 0
-state = "idle"
+# --- 전역 상태 ---
+active_interaction = None
+last_water_detected_frame = 0
+frame_count = 0
+
+# --- 물 마시기 상태 ---
+water_state = "idle"
+water_contact_counter = 0
+water_tracking_counter = 0
+
 initial_palm_y = None
 initial_palm_x = None
-upward_movement_count = 0
-total_movement_frames = 0
-last_cup_box = None
-last_cup_class = None
-cup_missing_frames = 0
+palm_y_history = []
+upward_count = 0
+cup_gesture_count = 0
 hand_missing_frames = 0
-palm_y_buffer = deque(maxlen=5)
-palm_x_buffer = deque(maxlen=5)
 
-# [신규] 제스처 유효성 검사 카운터
-cup_gesture_valid_frames = 0  # 물 마시는 동작 중 실제 컵 쥐는 자세가 유지된 프레임 수
+detected_cup_name = None
+detected_cup_box = None
+
+tracked_cup_box = None
+tracked_cup_name = None
+tracked_cup_missing = 0
+
+# ★ Kalman Filter 초기화
+palm_kalman = KalmanFilter2D()
+palm_position_history = deque(maxlen=10)  # 최근 10개 위치 저장
+
+# ★ 손 복원 관련 변수
+hand_last_seen_x = None
+hand_last_seen_y = None
+hand_velocity_x = 0
+hand_velocity_y = 0
+
+# --- 공부 상태 ---
+study_state = "idle"
+study_start_counter = 0
+study_total_frames = 0
+study_away_counter = 0
+study_start_time = None
+study_end_time = None
+study_object_name = "unknown"
+study_object_detail = "unknown"
+study_start_capture_path = None
+last_study_box = None
+last_study_class_name = None
+
+tracked_study_box = None
+tracked_study_name = None
+tracked_study_missing = 0
 
 
-def get_today_log_path():
+# =========================================================
+# [유틸리티 함수]
+# =========================================================
+
+def calculate_iou(box1, box2):
+    x1_1, y1_1, x2_1, y2_1 = box1
+    x1_2, y1_2, x2_2, y2_2 = box2
+
+    xi1 = max(x1_1, x1_2)
+    yi1 = max(y1_1, y1_2)
+    xi2 = min(x2_1, x2_2)
+    yi2 = min(y2_1, y2_2)
+
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+
+    box1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
+    box2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
+    union_area = box1_area + box2_area - inter_area
+
+    return inter_area / union_area if union_area > 0 else 0
+
+
+def get_log_path(prefix):
     today = datetime.now().strftime("%Y-%m-%d")
-    return os.path.join("logs", f"water_log_{today}.csv")
+    return os.path.join("logs", f"{prefix}_log_{today}.csv")
 
 
-def get_today_study_log_path():
-    today = datetime.now().strftime("%Y-%m-%d")
-    return os.path.join("logs", f"study_log_{today}.csv")
+def save_log(prefix, record):
+    path = get_log_path(prefix)
+    df = pd.DataFrame([record])
+
+    if os.path.exists(path):
+        df.to_csv(path, mode='a', header=False, index=False)
+    else:
+        df.to_csv(path, index=False)
+
+    if prefix == "water":
+        print(f"\n{'=' * 60}")
+        print(f"[물 마시기 감지] {record.get('timestamp')}")
+        print(f"  - 물체: {record.get('object')}")
+        print(f"  - 상승: {record.get('rise')}px")
+        print(f"  - 제스처: {record.get('gesture_conf')}")
+        print(f"  - 일관성: {record.get('consistency')}")
+        print(f"  - 저장: {path}")
+        print(f"{'=' * 60}\n")
+        sys.stdout.flush()
+    elif prefix == "study":
+        print(f"\n{'=' * 60}")
+        print(f"[공부 세션 종료]")
+        print(f"  - 시작: {record.get('start_time')}")
+        print(f"  - 종료: {record.get('end_time')}")
+        print(f"  - 시간: {record.get('duration_sec')}초")
+        print(f"  - 물체: {record.get('object')} ({record.get('object_detail')})")
+        print(f"  - 저장: {path}")
+        print(f"{'=' * 60}\n")
+        sys.stdout.flush()
 
 
 def save_capture_image(frame, timestamp_str, prefix="capture"):
-    # 파일명 중복 방지 (UUID 사용)
     unique_id = str(uuid.uuid4())[:8]
     filename = f"{prefix}_{timestamp_str.replace(':', '-').replace(' ', '_')}_{unique_id}.jpg"
     filepath = os.path.join("captures", filename)
@@ -115,13 +267,68 @@ def save_capture_image(frame, timestamp_str, prefix="capture"):
     return filepath
 
 
+def reset_water_state():
+    global water_state, water_contact_counter, water_tracking_counter
+    global initial_palm_y, initial_palm_x, palm_y_history
+    global upward_count, cup_gesture_count, hand_missing_frames
+    global detected_cup_name, detected_cup_box
+    global tracked_cup_box, tracked_cup_name, tracked_cup_missing
+    global palm_kalman, palm_position_history
+    global hand_last_seen_x, hand_last_seen_y, hand_velocity_x, hand_velocity_y
+
+    water_state = "idle"
+    water_contact_counter = 0
+    water_tracking_counter = 0
+    initial_palm_y = None
+    initial_palm_x = None
+    palm_y_history = []
+    upward_count = 0
+    cup_gesture_count = 0
+    hand_missing_frames = 0
+    detected_cup_name = None
+    detected_cup_box = None
+    tracked_cup_box = None
+    tracked_cup_name = None
+    tracked_cup_missing = 0
+
+    # Kalman Filter 리셋
+    palm_kalman.reset()
+    palm_position_history.clear()
+    hand_last_seen_x = None
+    hand_last_seen_y = None
+    hand_velocity_x = 0
+    hand_velocity_y = 0
+
+
+# =========================================================
+# [제스처 감지 함수]
+# =========================================================
+
+def calculate_lm_distance(lm1, lm2):
+    return math.sqrt((lm1.x - lm2.x) ** 2 + (lm1.y - lm2.y) ** 2)
+
+
+def is_holding_pen(landmarks):
+    pinch_dist = calculate_lm_distance(landmarks.landmark[4], landmarks.landmark[8])
+    support_dist = calculate_lm_distance(landmarks.landmark[4], landmarks.landmark[12])
+    return pinch_dist < 0.08 and support_dist < 0.10
+
+
+def is_holding_cup(landmarks):
+    c_shape_dist = calculate_lm_distance(landmarks.landmark[4], landmarks.landmark[8])
+    return 0.05 <= c_shape_dist <= 0.30
+
+
+def get_palm_position(hand_landmarks, img_w, img_h):
+    palm = hand_landmarks.landmark[9]
+    return palm.x * img_w, palm.y * img_h
+
+
 def calculate_distance_to_bbox(bbox, hand_landmarks, img_w, img_h):
     x1, y1, x2, y2 = bbox
     key_landmarks = [0, 4, 8, 12, 16, 20, 9]
 
     min_distance = float('inf')
-    palm_y = None
-    palm_x = None
 
     for idx in key_landmarks:
         lm = hand_landmarks.landmark[idx]
@@ -129,410 +336,595 @@ def calculate_distance_to_bbox(bbox, hand_landmarks, img_w, img_h):
         lm_y = lm.y * img_h
 
         if x1 <= lm_x <= x2 and y1 <= lm_y <= y2:
-            dist = 0
-        else:
-            closest_x = max(x1, min(lm_x, x2))
-            closest_y = max(y1, min(lm_y, y2))
-            dist = np.sqrt((lm_x - closest_x) ** 2 + (lm_y - closest_y) ** 2)
+            return 0
 
+        closest_x = max(x1, min(lm_x, x2))
+        closest_y = max(y1, min(lm_y, y2))
+        dist = np.sqrt((lm_x - closest_x) ** 2 + (lm_y - closest_y) ** 2)
         min_distance = min(min_distance, dist)
 
-        if idx == 9:  # Wrist/Palm center
-            palm_y = lm_y
-            palm_x = lm_x
-
-    return min_distance, palm_y, palm_x
+    return min_distance
 
 
-# ------------------ [신규] 제스처 감지 함수들 ------------------
-
-def calculate_lm_distance(lm1, lm2):
-    return math.sqrt((lm1.x - lm2.x) ** 2 + (lm1.y - lm2.y) ** 2)
-
-
-def is_holding_pen(landmarks):
-    """
-    펜 쥐기 감지 (Writing Gesture)
-    - 엄지(4)와 검지(8)가 매우 가깝고(집게),
-    - 중지(12)가 그 근처에서 받쳐주는 형태
-    """
-    thumb_tip = landmarks.landmark[4]
-    index_tip = landmarks.landmark[8]
-    middle_tip = landmarks.landmark[12]
-
-    pinch_dist = calculate_lm_distance(thumb_tip, index_tip)  # 엄지-검지 거리
-    support_dist = calculate_lm_distance(thumb_tip, middle_tip)  # 엄지-중지 거리
-
-    # 펜 쥐는 모양은 손가락 끝이 모여있음 (임계값 0.06 ~ 0.08)
-    if pinch_dist < 0.06 and support_dist < 0.08:
-        return True
-    return False
-
-
-def is_holding_cup(landmarks):
-    """
-    컵 쥐기 감지 (Holding Cup Gesture)
-    - 엄지(4)와 검지(8)가 적당히 벌어져 있어야 함 (너무 붙으면 펜/주먹, 너무 멀면 보자기)
-    - 나머지 손가락(12, 16, 20) 끝이 손바닥 쪽으로 굽혀져 있어야 함(Grip)
-    """
-    thumb_tip = landmarks.landmark[4]
-    index_tip = landmarks.landmark[8]
-    wrist = landmarks.landmark[0]
-
-    # 1. 엄지-검지 거리 체크 (C-Shape)
-    # 펜 잡기(0.06 미만)보다는 크고, 완전히 펼친 손(0.2 이상)보다는 작아야 함
-    c_shape_dist = calculate_lm_distance(thumb_tip, index_tip)
-
-    # 2. 나머지 손가락 굽힘 체크
-    # 중지(12), 약지(16), 소지(20)의 끝(TIP)이 시작점(MCP)보다 손목에 가까우면 굽힌 것
-    # (단순화를 위해 TIP과 WRIST 거리 vs MCP와 WRIST 거리 비교)
-    is_curled = True
-    for tip_idx, mcp_idx in [(12, 9), (16, 13), (20, 17)]:
-        tip_dist = calculate_lm_distance(landmarks.landmark[tip_idx], wrist)
-        mcp_dist = calculate_lm_distance(landmarks.landmark[mcp_idx], wrist)
-        # 손가락을 펴면 Tip이 MCP보다 멈. 굽히면 비슷하거나 Tip이 더 가까워짐.
-        # 컵을 잡으면 완전히 굽히진 않지만(주먹), 완전히 펴지도 않음.
-        # 여기서는 "완전히 펴지진 않음"을 체크하기보다 C-Shape에 집중하되
-        # 엄지-검지 거리가 핵심
-
-    if 0.07 <= c_shape_dist <= 0.25:
-        return True
-
-    return False
-
-def save_study_log(record):
-    log_path = get_today_study_log_path()
-    if os.path.exists(log_path):
-        df_existing = pd.read_csv(log_path)
-        df_new = pd.DataFrame([record])
-        df = pd.concat([df_existing, df_new], ignore_index=True)
+def get_category_from_class(class_name):
+    if class_name in STUDY_BOOK_CLASSES:
+        return "book"
+    elif class_name in STUDY_DEVICE_CLASSES:
+        return "device"
+    elif class_name in STUDY_TOOL_CLASSES:
+        return "tool"
     else:
-        df = pd.DataFrame([record])
-    df.to_csv(log_path, index=False)
-    print(f"[공부 세션 기록] {log_path} 저장 완료 (시간: {record['duration_sec']}초)")
+        return "unknown"
 
-# -------------------------------------------------------------
+
+# =========================================================
+# 메인 루프
+# =========================================================
 
 try:
     print("=" * 60)
-    print("제스처 기반 행동 감지 시스템 (Pen & Cup Gesture Integrated)")
+    print("YOLO-World + Kalman Filter Hand Tracking")
     print("=" * 60)
     print("ESC 키로 종료하세요.\n")
+    sys.stdout.flush()
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret:
-            break
-        if frame is None or frame.size == 0:
+        if not ret or frame is None or frame.size == 0:
             continue
 
+        frame_count += 1
         img_h, img_w = frame.shape[:2]
 
-        # YOLO Detection (매 프레임 수행 - 최적화 필요 시 건너뛰기 가능)
+        # YOLO-World 객체 탐지
         try:
-            results = yolo_model.predict(source=frame, imgsz=640, conf=0.25, verbose=False)
-        except:
+            results = yolo_model.predict(source=frame, conf=0.25, verbose=False)
+        except Exception as e:
+            print(f"[Warning] YOLO 탐지 오류: {e}")
             continue
 
-        boxes = results[0].boxes
+        # ------------------- 객체 탐지 및 필터링 -------------------
+        detected_cups = []
+        detected_study = []
 
-        # ------------------- 객체 탐지 및 추적 -------------------
-        cup_detected_this_frame = False
-        current_cup_box = None
-        current_cup_class = None
+        if len(results) > 0 and results[0].boxes is not None:
+            boxes = results[0].boxes
 
-        study_detected_this_frame = False
-        current_study_box = None
-        current_study_class = None
+            for box in boxes:
+                confidence = float(box.conf[0])
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                class_id = int(box.cls[0])
+                class_name = yolo_model.names[class_id]
 
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            confidence = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-            # [물체 필터링] 물 마시기
-            if cls_id in DRINKING_OBJECTS:
                 box_w, box_h = x2 - x1, y2 - y1
                 ratio = (box_w * box_h) / (img_w * img_h)
-                aspect_ratio = box_h / box_w if box_w > 0 else 0
+                bbox = (x1, y1, x2, y2)
 
-                if (confidence >= DRINKING_MIN_CONFIDENCE and
-                        ratio >= MIN_CUP_SIZE_RATIO and
-                        aspect_ratio >= DRINKING_MIN_ASPECT_RATIO and
-                        ((y1 + y2) / 2) <= img_h * 0.85):
+                if class_name in DRINKING_CLASSES:
+                    aspect_ratio = box_h / box_w if box_w > 0 else 0
 
-                    if not cup_detected_this_frame:
-                        current_cup_box = (x1, y1, x2, y2)
-                        current_cup_class = cls_id
-                        last_cup_box = current_cup_box
-                        last_cup_class = cls_id
-                        cup_detected_this_frame = True
-                        cup_missing_frames = 0
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    if (confidence >= DRINKING_MIN_CONFIDENCE and
+                            ratio >= MIN_OBJECT_SIZE_RATIO and
+                            aspect_ratio >= DRINKING_MIN_ASPECT_RATIO):
+                        detected_cups.append((bbox, class_name, confidence))
 
-            # [물체 필터링] 공부
-            if cls_id in STUDY_OBJECTS:
-                box_w, box_h = x2 - x1, y2 - y1
-                ratio = (box_w * box_h) / (img_w * img_h)
+                if class_name in ALL_STUDY_CLASSES:
+                    if confidence >= STUDY_MIN_CONFIDENCE and ratio >= 0.02:
+                        detected_study.append((bbox, class_name, confidence))
 
-                if confidence >= STUDY_MIN_CONFIDENCE and ratio >= 0.03:
-                    if not study_detected_this_frame:
-                        current_study_box = (x1, y1, x2, y2)
-                        current_study_class = cls_id
-                        last_study_box = current_study_box
-                        last_study_class = cls_id
-                        study_detected_this_frame = True
-                        study_object_missing_frames = 0
+        # ===============================================================
+        # IoU 기반 물체 추적
+        # ===============================================================
 
-                        label = "Book" if cls_id == BOOK_CLASS_ID else (
-                            "Laptop" if cls_id == LAPTOP_CLASS_ID else "Keyboard")
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 140, 255), 2)
-                        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 1)
+        if tracked_cup_box is not None:
+            matched = False
+            best_iou = 0
+            best_match_box = None
+            best_match_name = None
 
-        # 추적 보정
-        if not cup_detected_this_frame:
-            cup_missing_frames += 1
-            if cup_missing_frames <= MISSING_CUP_TOLERANCE and last_cup_box:
-                current_cup_box = last_cup_box
-                current_cup_class = last_cup_class
+            for cup_box, cup_name, cup_conf in detected_cups:
+                iou = calculate_iou(tracked_cup_box, cup_box)
+                if iou > IOU_THRESHOLD and iou > best_iou:
+                    best_iou = iou
+                    best_match_box = cup_box
+                    best_match_name = cup_name
+                    matched = True
 
-        if not study_detected_this_frame:
-            study_object_missing_frames += 1
-            if study_object_missing_frames <= STUDY_MISSING_OBJECT_TOLERANCE and last_study_box:
-                current_study_box = last_study_box
-                current_study_class = last_study_class
+            if matched:
+                tracked_cup_box = best_match_box
+                tracked_cup_missing = 0
             else:
-                current_study_box = None
+                tracked_cup_missing += 1
+                if tracked_cup_missing > MAX_TRACKING_FRAMES:
+                    print(f"[Track] 컵 추적 중단 (사라짐)")
+                    sys.stdout.flush()
+                    tracked_cup_box = None
+                    tracked_cup_name = None
+                    tracked_cup_missing = 0
 
-        # ------------------- 손 검출 및 제스처 분석 -------------------
-        hand_contact_cup = False
-        hand_contact_study = False
+        if tracked_study_box is not None:
+            matched = False
+            best_iou = 0
+            best_match_box = None
+            best_match_name = None
 
-        # 제스처 플래그
+            for study_box, study_name, study_conf in detected_study:
+                iou = calculate_iou(tracked_study_box, study_box)
+                if iou > IOU_THRESHOLD and iou > best_iou:
+                    best_iou = iou
+                    best_match_box = study_box
+                    best_match_name = study_name
+                    matched = True
+
+            if matched:
+                tracked_study_box = best_match_box
+                tracked_study_missing = 0
+            else:
+                tracked_study_missing += 1
+                if tracked_study_missing > MAX_TRACKING_FRAMES:
+                    tracked_study_box = None
+                    tracked_study_name = None
+                    tracked_study_missing = 0
+
+        # ===============================================================
+        # ★★★ 손 검출 + Kalman Filter 복원 ★★★
+        # ===============================================================
+
+        hand_detected = False
+        hand_landmarks = None
         gesture_holding_pen = False
         gesture_holding_cup = False
-
-        current_palm_y, current_palm_x = None, None
+        current_palm_x, current_palm_y = None, None
+        hand_restored = False  # 복원 플래그
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         hand_results = hands.process(rgb)
 
         if hand_results.multi_hand_landmarks:
+            # ★ 실제 손 감지됨
             hand_landmarks = hand_results.multi_hand_landmarks[0]
             mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            hand_detected = True
             hand_missing_frames = 0
 
-            # 1. 제스처 인식 실행
-            gesture_holding_pen = is_holding_pen(hand_landmarks)
+            raw_x, raw_y = get_palm_position(hand_landmarks, img_w, img_h)
+
+            # Kalman Filter 업데이트
+            filtered_x, filtered_y = palm_kalman.update(raw_x, raw_y)
+            current_palm_x, current_palm_y = filtered_x, filtered_y
+
+            # 위치 히스토리 저장
+            palm_position_history.append((current_palm_x, current_palm_y))
+
+            # 속도 계산 (최근 2개 위치)
+            if len(palm_position_history) >= 2:
+                hand_velocity_x = palm_position_history[-1][0] - palm_position_history[-2][0]
+                hand_velocity_y = palm_position_history[-1][1] - palm_position_history[-2][1]
+
+            hand_last_seen_x = current_palm_x
+            hand_last_seen_y = current_palm_y
+
             gesture_holding_cup = is_holding_cup(hand_landmarks)
-
-            # 2. 물체(컵)와 거리
-            if current_cup_box:
-                dist, py, px = calculate_distance_to_bbox(current_cup_box, hand_landmarks, img_w, img_h)
-                if dist <= PROXIMITY_DISTANCE:
-                    hand_contact_cup = True
-                    current_palm_y, current_palm_x = py, px
-                    cv2.rectangle(frame, (current_cup_box[0], current_cup_box[1]),
-                                  (current_cup_box[2], current_cup_box[3]), (255, 0, 0), 3)
-
-            # 3. 물체(공부)와 거리
-            if current_study_box:
-                s_dist, _, _ = calculate_distance_to_bbox(current_study_box, hand_landmarks, img_w, img_h)
-                if s_dist <= STUDY_PROXIMITY_DISTANCE:
-                    hand_contact_study = True
-                    cv2.rectangle(frame, (current_study_box[0], current_study_box[1]),
-                                  (current_study_box[2], current_study_box[3]), (0, 255, 255), 3)
-
-            # [UI] 현재 감지된 제스처 표시
-            if current_palm_x:
-                if gesture_holding_pen:
-                    cv2.putText(frame, "PEN GRIP", (int(current_palm_x), int(current_palm_y) - 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-                elif gesture_holding_cup:
-                    cv2.putText(frame, "CUP GRIP", (int(current_palm_x), int(current_palm_y) - 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 100, 0), 2)
+            gesture_holding_pen = is_holding_pen(hand_landmarks)
 
         else:
+            # ★ 손이 안 보임 → 복원 시도
             hand_missing_frames += 1
 
-        # ==========================================================
-        # 1. 물 마시기 로직 (보완됨: 제스처 결합)
-        # ==========================================================
-        if hand_contact_cup:
-            contact_counter += 1
-            if contact_counter == 1:
-                initial_palm_y = current_palm_y
-                initial_palm_x = current_palm_x
-                upward_movement_count = 0
-                total_movement_frames = 0
-                cup_gesture_valid_frames = 0  # 리셋
-        else:
-            if hand_missing_frames > MISSING_HAND_TOLERANCE or cup_missing_frames > MISSING_CUP_TOLERANCE:
-                if state != "drinking":
-                    contact_counter = 0
-                    drinking_counter = 0
-                    state = "idle"
-                    initial_palm_y = None
-                    palm_y_buffer.clear()
+            if hand_missing_frames <= MISSING_HAND_TOLERANCE and water_state == "tracking":
+                # ★★★ 복원 모드 ★★★
 
-        if contact_counter >= CONTACT_FRAMES and state == "idle":
-            state = "interacting"
+                # 방법 1: Kalman Filter 예측
+                pred_x, pred_y = palm_kalman.predict()
 
-        if state == "interacting" and current_palm_y is not None:
-            palm_y_buffer.append(current_palm_y)
-            palm_x_buffer.append(current_palm_x)
+                if pred_x is not None and pred_y is not None:
+                    # 화면 경계 체크
+                    pred_x = max(0, min(pred_x, img_w))
+                    pred_y = max(0, min(pred_y, img_h))
 
-            # [보완] 이동 중 '컵 쥐기 제스처'가 맞는지 카운트
-            if gesture_holding_cup:
-                cup_gesture_valid_frames += 1
+                    current_palm_x = pred_x
+                    current_palm_y = pred_y
+                    hand_restored = True
+                    hand_detected = True  # ★ 복원된 손도 "감지됨"으로 처리
 
-            if len(palm_y_buffer) >= 2 and initial_palm_y is not None:
-                smoothed_y = np.mean(list(palm_y_buffer)[-3:])
-                delta_y = (initial_palm_y - smoothed_y)
+                    # 복원된 위치 표시
+                    cv2.circle(frame, (int(current_palm_x), int(current_palm_y)), 15, (0, 255, 255), 3)
+                    cv2.putText(frame, "RESTORED", (int(current_palm_x) - 40, int(current_palm_y) - 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-                if delta_y > MOVE_THRESHOLD:
-                    drinking_counter += 1
+                    print(f"[Hand] 복원 {hand_missing_frames}/{MISSING_HAND_TOLERANCE} (Kalman)")
 
-                total_movement_frames += 1
-                curr_y_diff = (palm_y_buffer[-2] - palm_y_buffer[-1])
-                if curr_y_diff > 0.5:
-                    upward_movement_count += 1
+                # 방법 2: 선형 예측 (백업)
+                elif hand_last_seen_x is not None and len(palm_position_history) >= 2:
+                    # 등속도 가정
+                    current_palm_x = hand_last_seen_x + hand_velocity_x * hand_missing_frames
+                    current_palm_y = hand_last_seen_y + hand_velocity_y * hand_missing_frames
 
-        if state == "interacting" and drinking_counter >= DRINKING_FRAMES:
-            if initial_palm_y is not None and current_palm_y is not None:
-                total_rise = initial_palm_y - current_palm_y
-                consistency = upward_movement_count / total_movement_frames if total_movement_frames > 0 else 0
+                    # 화면 경계 체크
+                    current_palm_x = max(0, min(current_palm_x, img_w))
+                    current_palm_y = max(0, min(current_palm_y, img_h))
 
-                # [보완] 제스처 신뢰도 계산 (이동 기간 중 30% 이상은 컵 쥐는 모양이었는가?)
-                gesture_confidence = cup_gesture_valid_frames / total_movement_frames if total_movement_frames > 0 else 0
+                    hand_restored = True
+                    hand_detected = True
 
-                # 기존 조건 + 제스처 조건 추가
-                if total_rise >= MIN_TOTAL_MOVEMENT and consistency >= MOVEMENT_CONSISTENCY_THRESHOLD:
-                    # 제스처가 너무 아니면(0.2 미만) 기각, 맞으면 통과
-                    if gesture_confidence >= 0.2:
-                        state = "drinking"
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        obj_name = "Cup" if current_cup_class == CUP_CLASS_ID else "Bottle"
+                    cv2.circle(frame, (int(current_palm_x), int(current_palm_y)), 12, (255, 0, 255), 2)
+                    cv2.putText(frame, "LINEAR", (int(current_palm_x) - 30, int(current_palm_y) - 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
-                        cap_path = save_capture_image(frame.copy(), ts, "water_drinking")
-                        save_single_log({
-                            "timestamp": ts, "action": "water_drinking",
-                            "object": obj_name, "duration_frames": drinking_counter,
-                            "gesture_conf": round(gesture_confidence, 2),
-                            "capture_path": cap_path
-                        })
-                        print(f"★★★ 물 마시기 감지! (Rise: {total_rise:.0f}, GestureConf: {gesture_confidence:.2f}) ★★★")
+                    print(f"[Hand] 복원 {hand_missing_frames}/{MISSING_HAND_TOLERANCE} (Linear)")
+
+        # ===============================================================
+        # 거리 기반 상호작용 판단
+        # ===============================================================
+
+        closest_cup_box = None
+        closest_cup_name = None
+        closest_cup_distance = float('inf')
+        hand_contact_cup = False
+
+        if hand_detected and active_interaction != "study":
+            if tracked_cup_box is not None:
+                # ★ 복원된 손이어도 거리 계산 가능 (손바닥 위치만 있으면 됨)
+                if not hand_restored and hand_landmarks:
+                    dist = calculate_distance_to_bbox(tracked_cup_box, hand_landmarks, img_w, img_h)
+                else:
+                    # 복원된 경우: 손바닥 중심과 박스 중심 거리
+                    bx1, by1, bx2, by2 = tracked_cup_box
+                    box_cx = (bx1 + bx2) / 2
+                    box_cy = (by1 + by2) / 2
+                    dist = np.sqrt((current_palm_x - box_cx) ** 2 + (current_palm_y - box_cy) ** 2)
+
+                if dist <= WATER_PROXIMITY_DISTANCE:
+                    closest_cup_box = tracked_cup_box
+                    closest_cup_name = tracked_cup_name
+                    closest_cup_distance = dist
+                    hand_contact_cup = True
+
+            if not hand_contact_cup and len(detected_cups) > 0:
+                for cup_box, cup_name, cup_conf in detected_cups:
+                    if not hand_restored and hand_landmarks:
+                        dist = calculate_distance_to_bbox(cup_box, hand_landmarks, img_w, img_h)
                     else:
-                        print(f"[기각] 상승 감지됐으나 컵 쥐는 손 모양이 아님 ({gesture_confidence:.2f})")
-                        state = "idle"  # 상태 초기화
+                        bx1, by1, bx2, by2 = cup_box
+                        box_cx = (bx1 + bx2) / 2
+                        box_cy = (by1 + by2) / 2
+                        dist = np.sqrt((current_palm_x - box_cx) ** 2 + (current_palm_y - box_cy) ** 2)
 
-                    contact_counter = 0
-                    drinking_counter = 0
-                    if state != "drinking": state = "idle"
-                    initial_palm_y = None
+                    if dist <= WATER_PROXIMITY_DISTANCE and dist < closest_cup_distance:
+                        closest_cup_distance = dist
+                        closest_cup_box = cup_box
+                        closest_cup_name = cup_name
+                        hand_contact_cup = True
+
+            if closest_cup_box:
+                x1, y1, x2, y2 = closest_cup_box
+                color = (255, 0, 0) if tracked_cup_box is not None else (0, 255, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                cv2.putText(frame, f"{closest_cup_name} {int(closest_cup_distance)}px",
+                            (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        for cup_box, cup_name, cup_conf in detected_cups:
+            if cup_box != closest_cup_box:
+                x1, y1, x2, y2 = cup_box
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
+                cv2.putText(frame, f"{cup_name}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        # --- [B] 공부 (기존 로직 유지) ---
+        closest_study_box = None
+        closest_study_name = None
+        closest_study_distance = float('inf')
+        hand_contact_study = False
+
+        if hand_detected and active_interaction != "water" and not hand_restored:
+            if tracked_study_box is not None and hand_landmarks:
+                dist = calculate_distance_to_bbox(tracked_study_box, hand_landmarks, img_w, img_h)
+                if dist <= STUDY_PROXIMITY_DISTANCE:
+                    closest_study_box = tracked_study_box
+                    closest_study_name = tracked_study_name
+                    closest_study_distance = dist
+                    hand_contact_study = True
+
+            if not hand_contact_study and len(detected_study) > 0:
+                for study_box, study_name, study_conf in detected_study:
+                    dist = calculate_distance_to_bbox(study_box, hand_landmarks, img_w, img_h)
+
+                    if dist <= STUDY_PROXIMITY_DISTANCE and dist < closest_study_distance:
+                        closest_study_distance = dist
+                        closest_study_box = study_box
+                        closest_study_name = study_name
+                        hand_contact_study = True
+
+            if closest_study_box:
+                x1, y1, x2, y2 = closest_study_box
+
+                if closest_study_name in STUDY_BOOK_CLASSES:
+                    color = (0, 140, 255)
+                elif closest_study_name in STUDY_DEVICE_CLASSES:
+                    color = (255, 140, 0)
+                else:
+                    color = (0, 255, 140)
+
+                line_width = 3 if tracked_study_box is not None else 2
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, line_width)
+                cv2.putText(frame, f"{closest_study_name} {int(closest_study_distance)}px",
+                            (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                last_study_box = closest_study_box
+                last_study_class_name = closest_study_name
+
+        for study_box, study_name, study_conf in detected_study:
+            if study_box != closest_study_box:
+                x1, y1, x2, y2 = study_box
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (200, 200, 200), 1)
+                cv2.putText(frame, f"{study_name}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         # ==========================================================
-        # 2. 공부 감지 로직 (보완됨: 펜 쥐기 결합)
+        # [로직 A] 물 마시기
         # ==========================================================
 
-        # [핵심 변경] '공부 접촉'의 정의를 확장:
-        # 1. 손이 책 영역 안에 있을 때 (기존)
-        # 2. 손이 책 영역 안에 있고 + 펜을 쥐고 있을 때 (강력한 신호)
-        is_effectively_studying = False
+        in_cooldown = (frame_count - last_water_detected_frame) < DRINKING_COOLDOWN
 
-        if hand_contact_study:
-            is_effectively_studying = True
+        if water_state == "idle" and not in_cooldown:
+            if hand_detected and hand_contact_cup and active_interaction != "study":
+                water_contact_counter += 1
 
-        # [추가] 공부 세션 중이라면, 책 박스에서 손이 살짝 벗어나도 '펜을 쥐고 있으면' 공부로 인정
-        # (책상 위에서 필기하다가 손이 책 영역 밖으로 나가는 경우 방지)
-        if study_state == "studying" and gesture_holding_pen:
-            # 마지막 책 위치 근처라면 인정 (너무 멀리 가면 안됨)
-            if current_palm_x and last_study_box:
-                # 간단히 화면 하단부(책상)에 손이 있다면 인정
-                if current_palm_y > img_h * 0.4:
-                    is_effectively_studying = True
+                if water_contact_counter == 1:
+                    tracked_cup_box = closest_cup_box
+                    tracked_cup_name = closest_cup_name
+                    tracked_cup_missing = 0
+                    print(f"[Water] 접촉 감지 시작 ({tracked_cup_name}, 거리: {int(closest_cup_distance)}px)")
+                    print(f"[Track] 컵 추적 시작 → 클래스 고정!")
+                    sys.stdout.flush()
 
-        if is_effectively_studying:
-            # 공부 중에는 쿨타임 리셋
-            if study_state == "studying":
-                study_cooldown_counter = 0
-                study_total_frames += 1
+                if water_contact_counter >= WATER_CONTACT_FRAMES:
+                    water_state = "tracking"
+                    active_interaction = "water"
+                    detected_cup_name = tracked_cup_name
+                    detected_cup_box = tracked_cup_box
 
-                # 펜 쥐고 있으면 보너스 점수 혹은 확실한 상태 표시
-                if gesture_holding_pen:
-                    cv2.putText(frame, "WRITING...", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+                    initial_palm_y = current_palm_y
+                    initial_palm_x = current_palm_x
+                    palm_y_history = [current_palm_y]
+                    water_tracking_counter = 0
+                    upward_count = 0
+                    cup_gesture_count = 0
 
-                if current_study_class:
-                    study_last_object = "book" if current_study_class == BOOK_CLASS_ID else (
-                        "laptop" if current_study_class == LAPTOP_CLASS_ID else "keyboard")
+                    print(f"[Water] 잠금 모드 진입! (물체: {detected_cup_name})")
+                    print(f"→ 이제 손 움직임만 추적합니다 (복원 가능)")
+                    sys.stdout.flush()
+            else:
+                if water_contact_counter > 0:
+                    print(f"[Water] 접촉 중단 (카운터 리셋)")
+                    sys.stdout.flush()
+                water_contact_counter = 0
+                tracked_cup_box = None
+                tracked_cup_name = None
+                tracked_cup_missing = 0
 
-            # 공부 시작 전 (Idle)
-            elif study_state == "idle":
+        elif water_state == "tracking":
+            if hand_detected:
+                water_tracking_counter += 1
+                palm_y_history.append(current_palm_y)
+
+                if not hand_restored and gesture_holding_cup:
+                    cup_gesture_count += 1
+
+                if len(palm_y_history) >= 2:
+                    if palm_y_history[-2] - palm_y_history[-1] > 0.5:
+                        upward_count += 1
+
+                # ★ 복원된 손이어도 카운터는 리셋하지 않음
+                if not hand_restored:
+                    hand_missing_frames = 0
+
+            else:
+                # ★ 복원 실패 시에만 중단
+                if hand_missing_frames > MISSING_HAND_TOLERANCE:
+                    print(f"[Water] 손 완전 사라짐 → 중단")
+                    sys.stdout.flush()
+                    reset_water_state()
+                    active_interaction = None
+
+            if water_tracking_counter >= WATER_TRACKING_FRAMES:
+                total_rise = initial_palm_y - palm_y_history[-1]
+                consistency = upward_count / water_tracking_counter if water_tracking_counter > 0 else 0
+                gesture_conf = cup_gesture_count / water_tracking_counter if water_tracking_counter > 0 else 0
+
+                print(f"\n[Water 판단]")
+                print(f"  상승: {total_rise:.1f}px (>= {MIN_TOTAL_RISE})")
+                print(f"  일관성: {consistency:.2f} (>= {MOVEMENT_CONSISTENCY})")
+                print(f"  제스처: {gesture_conf:.2f} (>= {GESTURE_CONFIDENCE})")
+                sys.stdout.flush()
+
+                if (total_rise >= MIN_TOTAL_RISE and
+                        consistency >= MOVEMENT_CONSISTENCY and
+                        gesture_conf >= GESTURE_CONFIDENCE):
+
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cap_path = save_capture_image(frame.copy(), ts, "water_drinking")
+
+                    save_log("water", {
+                        "timestamp": ts,
+                        "action": "water_drinking",
+                        "object": detected_cup_name,
+                        "duration_frames": water_tracking_counter,
+                        "rise": int(total_rise),
+                        "consistency": round(consistency, 2),
+                        "gesture_conf": round(gesture_conf, 2),
+                        "capture_path": cap_path
+                    })
+
+                    last_water_detected_frame = frame_count
+                    reset_water_state()
+                    active_interaction = None
+                    print(f"★★★ 물 마시기 확정! ★★★\n")
+                    sys.stdout.flush()
+                else:
+                    print(f"[Water] 조건 미달 → 기각\n")
+                    sys.stdout.flush()
+                    reset_water_state()
+                    active_interaction = None
+
+        # ==========================================================
+        # [로직 B] 공부 감지 (기존 유지)
+        # ==========================================================
+
+        if study_state == "idle" and active_interaction != "water":
+            if hand_detected and hand_contact_study:
                 study_start_counter += 1
 
-                # [UI] 게이지 바 그리기
-                if current_study_box:
-                    bx1, by1, bx2, by2 = current_study_box
+                if study_start_counter == 1:
+                    tracked_study_box = closest_study_box
+                    tracked_study_name = closest_study_name
+                    tracked_study_missing = 0
+
+                if closest_study_box:
+                    bx1, by1, bx2, by2 = closest_study_box
                     bar_y = by1 - 15
                     progress = min(study_start_counter / STUDY_MIN_START_FRAMES, 1.0)
-                    cv2.rectangle(frame, (bx1, bar_y), (bx2, bar_y + 10), (200, 200, 200), -1)
-                    cv2.rectangle(frame, (bx1, bar_y), (bx1 + int((bx2 - bx1) * progress), bar_y + 10), (0, 165, 255),
-                                  -1)
+                    cv2.rectangle(frame, (bx1, bar_y), (bx1 + int((bx2 - bx1) * progress), bar_y + 10),
+                                  (0, 165, 255), -1)
 
-                    msg = "Hold Hand"
-                    if gesture_holding_pen: msg = "Pen Detected!"
-                    cv2.putText(frame, msg, (bx1, bar_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+                    msg = "Pen!" if gesture_holding_pen else "Hand"
+                    cv2.putText(frame, msg, (bx1, bar_y - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
                 if study_start_counter >= STUDY_MIN_START_FRAMES:
                     study_state = "studying"
+                    active_interaction = "study"
                     study_total_frames = 0
-                    print(f"[STUDY] 공부 세션 시작! (조건 충족)")
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    save_capture_image(frame.copy(), ts, "study_start")
+                    study_away_counter = 0
 
-        else:
-            # 손이 떨어짐
-            if study_state == "idle":
+                    study_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    study_start_capture_path = save_capture_image(frame.copy(), study_start_time, "study_start")
+
+                    study_object_name = get_category_from_class(tracked_study_name)
+                    study_object_detail = tracked_study_name
+
+                    print(f"\n[Study] 세션 시작!")
+                    print(f"  시작 시간: {study_start_time}")
+                    print(f"  물체: {study_object_name} ({study_object_detail})")
+                    sys.stdout.flush()
+            else:
                 study_start_counter = 0
-            elif study_state == "studying":
-                study_cooldown_counter += 1
-                study_total_frames += 1
+                tracked_study_box = None
+                tracked_study_name = None
 
-                if study_cooldown_counter > STUDY_TIMEOUT_FRAMES:
-                    print(f"[STUDY] 세션 종료. 총 프레임: {study_total_frames}")
-                    if study_total_frames >= STUDY_MIN_SESSION_FRAMES:
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        save_study_log({
-                            "timestamp": ts,
-                            "action": "study_session",
-                            "object": study_last_object,
-                            "duration_frames": study_total_frames,
-                            "duration_sec": round(study_total_frames / 30, 1),
-                            "capture_path": "Started_Captured_Only"
-                        })
+        elif study_state == "studying":
+            study_total_frames += 1
+
+            if hand_detected and hand_contact_study:
+                study_away_counter = 0
+
+                if gesture_holding_pen:
+                    cv2.putText(frame, "WRITING...", (50, 200),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+            else:
+                study_away_counter += 1
+
+                if study_away_counter >= STUDY_AWAY_FRAMES:
                     study_state = "idle"
+                    active_interaction = None
+
+                    study_end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    study_end_capture_path = save_capture_image(frame.copy(), study_end_time, "study_end")
+
+                    duration_sec = round(study_total_frames / 30, 1)
+
+                    if study_total_frames >= STUDY_MIN_SESSION_FRAMES:
+                        save_log("study", {
+                            "start_time": study_start_time,
+                            "end_time": study_end_time,
+                            "duration_sec": duration_sec,
+                            "object": study_object_name,
+                            "object_detail": study_object_detail,
+                            "start_capture": study_start_capture_path,
+                            "end_capture": study_end_capture_path
+                        })
+                        print(f"[Study] 세션 종료 (기록 완료)")
+                    else:
+                        print(f"[Study] 세션 너무 짧음 (기록 안 함)")
+
+                    study_start_counter = 0
                     study_total_frames = 0
-                    study_cooldown_counter = 0
+                    study_away_counter = 0
+                    tracked_study_box = None
+                    tracked_study_name = None
+                    sys.stdout.flush()
 
         # ==========================================================
-        # 화면 표시 (UI)
+        # UI 표시
         # ==========================================================
 
-        # 물 상태
-        cv2.putText(frame, f"Water: {state}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        if current_palm_x and not hand_restored:
+            if gesture_holding_pen and active_interaction != "water":
+                cv2.putText(frame, "PEN", (int(current_palm_x) - 20, int(current_palm_y) - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+            elif gesture_holding_cup and active_interaction != "study":
+                cv2.putText(frame, "CUP", (int(current_palm_x) - 20, int(current_palm_y) - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2)
 
-        # 공부 상태
-        study_color = (0, 200, 255) if study_state == "studying" else (200, 200, 200)
-        cv2.putText(frame, f"Study: {study_state}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, study_color, 2)
+        if in_cooldown:
+            cooldown_sec = (DRINKING_COOLDOWN - (frame_count - last_water_detected_frame)) / 30
+            cv2.putText(frame, f"Cooldown: {cooldown_sec:.1f}s", (img_w - 250, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
-        if study_state == "studying":
-            seconds = study_total_frames / 30
-            cv2.putText(frame, f"Time: {seconds:.1f}s", (10, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, study_color, 2)
-            if study_cooldown_counter > 0:
-                cv2.putText(frame, f"Timeout in: {(STUDY_TIMEOUT_FRAMES - study_cooldown_counter) / 30:.1f}s",
-                            (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        lock_color = (0, 0, 255) if active_interaction else (100, 100, 100)
+        lock_text = f"LOCK: {active_interaction.upper() if active_interaction else 'NONE'}"
+        cv2.putText(frame, lock_text, (img_w - 250, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, lock_color, 2)
 
-        cv2.imshow("Water + Study Tracker (Gesture Enhanced)", frame)
+        if tracked_cup_box is not None:
+            cv2.putText(frame, f"Tracking: {tracked_cup_name}", (10, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        if water_state == "idle":
+            water_color = (150, 150, 0)
+            status = "IDLE"
+            if water_contact_counter > 0:
+                status = f"Contact: {water_contact_counter}/{WATER_CONTACT_FRAMES}"
+        elif water_state == "tracking":
+            water_color = (0, 255, 255)
+            status = f"TRACKING {water_tracking_counter}/{WATER_TRACKING_FRAMES}"
+
+            if initial_palm_y and current_palm_y:
+                current_rise = initial_palm_y - current_palm_y
+                cv2.putText(frame, f"Rise: {current_rise:.1f}px", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, water_color, 2)
+
+        cv2.putText(frame, f"Water: {status}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, water_color, 2)
+
+        # ★ 손 복원 상태 표시
+        if hand_restored:
+            cv2.putText(frame, f"Hand: RESTORED ({hand_missing_frames}f)", (10, 180),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+        if study_state == "idle":
+            study_color = (100, 100, 100)
+            study_status = "IDLE"
+            if study_start_counter > 0:
+                study_status = f"Starting: {study_start_counter}/{STUDY_MIN_START_FRAMES}"
+        elif study_state == "studying":
+            if active_interaction == "study":
+                study_color = (0, 255, 255)
+            else:
+                study_color = (0, 200, 255)
+
+            sec = study_total_frames / 30
+            study_status = f"STUDYING {sec:.1f}s"
+
+            if study_away_counter > 0:
+                away_sec = (STUDY_AWAY_FRAMES - study_away_counter) / 30
+                cv2.putText(frame, f"Away: {away_sec:.1f}s left", (10, 115),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        cv2.putText(frame, f"Study: {study_status}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, study_color, 2)
+
+        cv2.imshow("YOLO-World + Kalman Filter", frame)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
