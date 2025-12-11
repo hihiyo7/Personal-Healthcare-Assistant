@@ -341,8 +341,10 @@ export default function App() {
                   isDarkMode={isDarkMode}
                   onUpdateLog={updateLaptopLog}
                   onBack={() => setView("detail-study")}
+                  onImageAnalysis={handleStudyImageAnalysis}  // ★ 추가
                 />
               )}
+
 
               {view === "detail-food" && (
                 <ComingSoon

@@ -213,18 +213,26 @@ def get_water_logs(date_str: str):
         df = merge_csv_files(files)
         if df.empty:
             return []
+
         df['id'] = df.index
 
-        if 'duration_frames' in df.columns:
-            df['amount'] = pd.to_numeric(df['duration_frames'], errors='coerce').fillna(200).astype(int)
-        else:
-            df['amount'] = 200
+        # amount: duration_frames 기반으로 (이미 있으면 스킵)
+        if 'duration_frames' in df.columns and 'amount' not in df.columns:
+            df['amount'] = pd.to_numeric(df['duration_frames'], errors='coerce').fillna(0).astype(int)
+        elif 'amount' not in df.columns:
+            df['amount'] = 0
 
-        if 'capture_path' in df.columns:
-            df['imageUrl'] = df['capture_path'].apply(format_capture_url)
-            df['imageFile'] = df['capture_path'].apply(
-                lambda x: os.path.basename(str(x)) if isinstance(x, str) else None
+        # ★ timestamp 기준으로 captures 이미지 찾기 (capture_path는 무시)
+        if 'timestamp' in df.columns:
+            df['imageUrl'] = df['timestamp'].apply(
+                lambda ts: find_capture_by_timestamp('water_drinking', ts)
             )
+        else:
+            df['imageUrl'] = None
+
+        df['imageFile'] = df['imageUrl'].apply(
+            lambda url: os.path.basename(str(url)) if isinstance(url, str) else None
+        )
 
         if 'ai_result' not in df.columns:
             df['ai_result'] = "Not Analyzed"
@@ -233,9 +241,10 @@ def get_water_logs(date_str: str):
         df = df.astype(object).where(pd.notnull(df), None)
         return df.to_dict(orient="records")
     except Exception as e:
-        print("❌ water 로그 로드 실패:", e)
+        print("water 로그 로드 실패:", e)
         traceback.print_exc()
         return []
+
 
 
 @app.get("/api/logs/study/{date_str}")
@@ -248,15 +257,30 @@ def get_study_logs(date_str: str):
         if df.empty:
             return {"logs": [], "totalBookMin": 0, "totalLaptopMin": 0, "sessions": []}
 
+        # duration_sec → duration_min (없으면 생성)
+        if 'duration_sec' in df.columns and 'duration_min' not in df.columns:
+            df['duration_min'] = pd.to_numeric(df['duration_sec'], errors='coerce').fillna(0) / 60.0
+
         book_min, book_count, book_sessions = calculate_study_duration_per_file(df, 'book')
         laptop_min, laptop_count, laptop_sessions = calculate_study_duration_per_file(df, 'laptop')
 
         df['id'] = df.index
+
+        # 1) 우선 CSV의 capture_path로부터 laptop/book 캡처 사용
+        df['imageUrl'] = None
         if 'capture_path' in df.columns:
             df['imageUrl'] = df['capture_path'].apply(format_capture_url)
-            df['imageFile'] = df['capture_path'].apply(
-                lambda x: os.path.basename(str(x)) if isinstance(x, str) else None
+
+        # 2) 없는 것만 timestamp 기반 study_start / study_end / study_* 에서 찾아오기
+        if 'timestamp' in df.columns:
+            mask = df['imageUrl'].isna()
+            df.loc[mask, 'imageUrl'] = df.loc[mask, 'timestamp'].apply(
+                lambda ts: find_capture_by_timestamp(['study_start', 'study_end', 'study'], ts)
             )
+
+        df['imageFile'] = df['imageUrl'].apply(
+            lambda url: os.path.basename(str(url)) if isinstance(url, str) else None
+        )
 
         if 'object' in df.columns:
             df['type'] = df['object'].apply(
@@ -283,9 +307,39 @@ def get_study_logs(date_str: str):
             "activityCount": book_count + laptop_count,
         }
     except Exception as e:
-        print("❌ study 로그 로드 실패:", e)
+        print("study 로그 로드 실패:", e)
         traceback.print_exc()
         return {"logs": [], "totalBookMin": 0, "totalLaptopMin": 0, "sessions": []}
+
+
+def find_capture_by_timestamp(prefixes, timestamp: str) -> Optional[str]:
+    """
+    prefixes: 'water_drinking' 또는 ['study_start', 'study_end', 'study']처럼 리스트
+    timestamp: '2025-12-04T20:44:23' 또는 '2025-12-04 20:44:23'
+    → Desktop/captures/{prefix}_{YYYY-MM-DD}_{HH-MM}* 를 찾아서 첫 파일을 반환
+    """
+    if not timestamp:
+        return None
+    try:
+        dt = pd.to_datetime(str(timestamp))
+    except Exception:
+        return None
+
+    date_str = dt.strftime('%Y-%m-%d')   # 2025-12-04
+    time_key = dt.strftime('%H-%M')      # 20-44
+
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+
+    for p in prefixes:
+        pattern = os.path.join(CAPTURES_DIR, f"{p}_{date_str}_{time_key}*")
+        matches = glob.glob(pattern)
+        if matches:
+            return format_capture_url(matches[0])
+
+    return None
+
+
 
 
 # ======================================================================
@@ -393,19 +447,41 @@ async def analyze_image(request: AnalysisRequest):
 @app.post("/api/summary")
 async def generate_summary(request: SummaryRequest):
     if TEXT_MODEL is None:
-        return {"summary": "오늘은 물과 공부 기록을 천천히 쌓아가는 하루였어요. 내일도 건강한 습관을 이어가봐요."}
+        return {
+            "summary": (
+                "오늘은 물과 공부 기록을 차분히 쌓아가는 하루였어요. "
+                "내일도 너무 무리하지 말고 꾸준한 페이스를 이어가면 좋겠어요."
+            )
+        }
 
     try:
+        # 물/공부 달성 여부
         water_achieved = "달성" if request.waterMl >= request.waterGoal else "부족"
         study_achieved = "달성" if request.studyMin >= request.studyGoal else "부족"
-        
+
+        # 기본 정보 정리
         base_info = f"""
-- 물: {request.waterMl}ml / 목표 {request.waterGoal}ml ({water_achieved})
+- 물 섭취: {request.waterMl}ml / 목표 {request.waterGoal}ml ({water_achieved})
 - 공부: {request.studyMin}분 / 목표 {request.studyGoal}분 ({study_achieved})
 """
 
+        # 💻 노트북 활동 요약
+        laptop_section = ""
+        if request.laptopInfo and request.laptopInfo.durationMin > 0:
+            laptop = request.laptopInfo
+            category_names = {
+                "lecture": "강의 시청",
+                "assignment": "과제",
+                "coding": "코딩",
+                "youtube": "YouTube",
+                "game": "게임",
+            }
+            cat_name = category_names.get(laptop.category, laptop.category)
+            laptop_section = f"- 노트북 활동: {cat_name} {laptop.durationMin}분\n"
+
+        # 📚 책 정보
         book_section = ""
-        if request.bookInfo and (request.bookInfo.title.strip() or request.bookInfo.description.strip()):
+        if request.bookInfo and (request.bookInfo.title or request.bookInfo.description):
             book = request.bookInfo
             purpose_text = "학습 목적" if book.purpose == "study" else "취미 독서"
             book_section = f"""
@@ -416,50 +492,46 @@ async def generate_summary(request: SummaryRequest):
 - 독서 목적: {purpose_text}
 - 책 설명: {book.description[:200] if book.description else '설명 없음'}
 """
-        
-        laptop_section = ""
-        if request.laptopInfo and request.laptopInfo.durationMin > 0:
-            laptop = request.laptopInfo
-            category_names = {
-                'lecture': '강의 시청',
-                'assignment': '과제',
-                'coding': '코딩',
-                'youtube': 'YouTube',
-                'game': '게임'
-            }
-            cat_name = category_names.get(laptop.category, laptop.category)
-            laptop_section = f"""- 노트북 활동: {cat_name} ({laptop.durationMin}분)"""
 
-        if book_section:
-            prompt = f"""
-당신은 따뜻하고 지적인 독서 코치입니다. 오늘 기록:
-{base_info}{book_section}{laptop_section}
-요구사항:
-1. "오늘은 ~한 하루였어요"로 시작 (1-2문장)
-2. 책의 줄거리나 핵심 내용을 간단히 요약해서 언급 (1-2문장)
-3. 그 내용을 바탕으로 한 조언이나 통찰 (1문장)
-4. 따뜻한 격려로 마무리 (1문장)
-5. 총 5~6문장 정도의 한 단락으로 작성, 불릿 금지
-"""
-        else:
-            prompt = f"""
-당신은 하루 요약 코치입니다. 오늘 기록:
-{base_info}{laptop_section}
-요구사항:
-- 2~3문장 한 단락
-- "오늘은 ~한 하루였어요"로 시작
-- 물/공부 달성 여부 언급
-- 격려 포함, 불릿 금지
+        # 📌 통합 프롬프트 — 하루 요약 + 물 + 공부 + 노트북 + 독서(있으면)
+        prompt = f"""
+당신은 차분하고 따뜻한 하루 리포트 코치입니다.
+
+[오늘의 기록]
+{base_info}{laptop_section}{book_section}
+
+[작성 규칙]
+1) 첫 1~2문장은 물 섭취와 공부 목표 달성 정도를 중심으로,
+   "오늘은 ~한 하루였어요" 형태로 하루 전체를 자연스럽게 요약하세요.
+
+2) 다음 1~2문장은 물 섭취 습관에 대한 구체적인 피드백과
+   내일을 위한 한두 가지 현실적인 제안을 적어 주세요
+   (너무 과장되거나 명령조인 표현은 피하기).
+
+3) 그 다음 1~2문장은 공부/집중 패턴에 대한 피드백과
+   목표 달성에 도움이 될 차분한 조언을 적어 주세요.
+
+4) 마지막 1~2문장은 오늘 읽은 책이 마음과 하루에
+   어떤 여운이나 작은 변화를 남겼는지 요약해 주세요.
+   줄거리 설명은 최소화하고 감정·성장 중심으로 작성하세요.
+   (만약 독서 기록이 없다면 이 항목은 자연스럽게 생략하세요.)
+
+5) 전체는 5~7문장, 존댓말, 차분하지만 따뜻한 톤.
+   지나치게 극적인 표현이나 과장된 격려는 피하세요.
 """
 
+        # 🔥 AI 실행
         response = TEXT_MODEL.generate_content(prompt)
         summary = ' '.join(response.text.strip().split())
+
         return {"summary": summary}
-        
+
     except Exception as e:
-        print("❌ Gemini API error 상세:", e)
+        print("❌ AI summary error:", e)
         traceback.print_exc()
-        return {"summary": "오늘은 물과 공부 기록을 천천히 쌓아가는 하루였어요. 내일도 건강한 습관을 이어가봐요."}
+        return {
+            "summary": "오늘은 물과 공부 기록을 차분히 쌓아가는 하루였어요. 내일도 무리하지 말고 편안하게 이어가보세요."
+        }
 
 
 if __name__ == "__main__":

@@ -127,6 +127,68 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
 
   const totalStudyMin = displayTotalBookMin + totalLaptopStudyMin;
 
+const handleImageAnalysis = useCallback(async (logId, imageFile) => {
+  let targetFilename = imageFile;
+
+  // 로그에서 파일명 찾기
+  if (!targetFilename) {
+    const log = studyLogs.find(l => l.id === logId);
+    if (log) {
+      if (log.imageFile) {
+        targetFilename = log.imageFile;
+      } else if (log.imageUrl) {
+        const parts = log.imageUrl.split('/');
+        targetFilename = parts[parts.length - 1];
+      }
+    }
+  }
+
+  if (!targetFilename) {
+    alert('분석할 이미지 파일을 찾을 수 없습니다.');
+    return;
+  }
+
+  // 로딩 플래그 켜기
+  setStudyLogs(prev =>
+    prev.map(l =>
+      l.id === logId ? { ...l, isAnalyzing: true } : l
+    )
+  );
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_filename: targetFilename,
+        log_id: logId,
+      }),
+    });
+
+    const data = await res.json();
+    const resultText = data.result || '';
+
+    setStudyLogs(prev =>
+      prev.map(l =>
+        l.id === logId
+          ? { ...l, aiResult: resultText, isAnalyzing: false, analyzed: true }
+          : l
+      )
+    );
+  } catch (e) {
+    console.error(e);
+    alert('AI 분석 실패');
+    setStudyLogs(prev =>
+      prev.map(l =>
+        l.id === logId ? { ...l, isAnalyzing: false } : l
+      )
+    );
+  }
+}, [studyLogs]);
+
+
+
+
 // ─────────────────────────────────────────────
 // 3. 독서 요약 생성 ✅ (최종 수정본)
 // ─────────────────────────────────────────────
@@ -248,13 +310,14 @@ const handleUpdateBookInfo = useCallback(async (log, updates) => {
     loadStudyLogs,
     fetchStudySummary,
     handleUpdateBookInfo,
-
+    handleImageAnalysis,  // ★ 추가
 
     studySummaryText,
     studySummaryLoading,
 
     bookLogs: studyLogs.filter(l => l.type === 'book'),
     laptopLogs: studyLogs.filter(l => l.type === 'laptop'),
+
 
     hasServerData: studyLogs.length > 0,
   };

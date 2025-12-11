@@ -43,18 +43,58 @@ export const formatWaterLogs = (rawLogs) => {
   }).sort((a, b) => a.time.localeCompare(b.time));
 };
 
-// ... (calculateLogStats, updateLogEntry는 기존 코드 그대로 유지) ...
 export const calculateLogStats = (logs) => {
-  const waterMl = logs.reduce((sum, log) => sum + (log.amount || 0), 0);
-  const drinkCount = logs.filter(log => (log.amount || 0) > 0).length;
-  return { waterMl, drinkCount };
-};
+  if (!Array.isArray(logs) || logs.length === 0) {
+    return { waterMl: 0, drinkCount: 0 };
+  }
 
-export const updateLogEntry = (logs, logId, updates) => {
-  return logs.map(log => {
-    if (log.id === logId) {
-      return { ...log, ...updates };
+  // 시간 기준 정렬 (HH:MM 문자열 기준)
+  const sorted = [...logs].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+
+  let totalWater = 0;
+  let drinkCount = 0;
+
+  let currentGroupAmount = 0;
+  let lastTimeMin = null;
+
+  const toMinutes = (t) => {
+    if (!t || !t.includes(':')) return null;
+    const [h, m] = t.split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  };
+
+  sorted.forEach((log) => {
+    const timeMin = toMinutes(log.time);
+    const amount = Number(log.amount) || 0;
+
+    if (lastTimeMin === null || timeMin === null) {
+      // 첫 로그 → 새 그룹 시작
+      if (currentGroupAmount > 0) {
+        totalWater += currentGroupAmount;
+        drinkCount += 1;
+      }
+      currentGroupAmount = amount;
+    } else {
+      const gap = timeMin - lastTimeMin;
+      if (gap > 5) {
+        // 5분 초과 → 이전 그룹 종료, 새 그룹 시작
+        totalWater += currentGroupAmount;
+        drinkCount += 1;
+        currentGroupAmount = amount;
+      } else {
+        // 같은 활동으로 계속
+        currentGroupAmount += amount;
+      }
     }
-    return log;
+
+    lastTimeMin = timeMin;
   });
+
+  // 마지막 그룹 반영
+  if (currentGroupAmount > 0) {
+    totalWater += currentGroupAmount;
+    drinkCount += 1;
+  }
+
+  return { waterMl: totalWater, drinkCount };
 };
