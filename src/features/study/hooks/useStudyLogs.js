@@ -62,6 +62,7 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
         purpose: log.purpose || "study",
 
         sourceFile: log.source_file || "",
+        sourceFile: log.source_file || log.sourceFile || "",
         category: log.category || "lecture",
 
         isAnalyzing: false,
@@ -194,22 +195,13 @@ const fetchStudySummary = useCallback(async () => {
 ]);
 // ─────────────────────────────────────────────
 // 4. 책 정보 업데이트 (BookModal → 서버 저장)
-// ─────────────────────────────────────────────
+
+
 const handleUpdateBookInfo = useCallback(async (log, updates) => {
   try {
-    if (!log?.id) {
-      console.error("❌ log_id 없음 — 저장 불가");
-      return;
-    }
-
-    if (!log?.sourceFile) {
-      console.error("❌ source_file 없음 — 저장 불가");
-      return;
-    }
-
     const payload = {
-      source_file: log.sourceFile,        // ⚠ snake_case (서버 요구)
-      log_id: log.id,                     // ⚠ 필수
+      source_file: log.sourceFile,   // csv 파일
+      log_id: 0,                     // 책 정보는 파일 전체 업데이트 → 0으로 고정
       updates: {
         book_id: updates.bookId,
         book_title: updates.bookTitle,
@@ -225,28 +217,19 @@ const handleUpdateBookInfo = useCallback(async (log, updates) => {
       }
     };
 
-    console.log("📤 Sending payload:", payload);
-
     const response = await fetch(`${API_BASE_URL}/api/logs/update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 
-    console.log("Response status:", response.status);
-
-    if (!response.ok) {
-      console.error("❌ 서버 업데이트 실패:", await response.text());
-      return;
-    }
-
-    console.log("✅ 서버 저장 성공 → 로그 재로드");
     await loadStudyLogs(currentDateRef.current);
 
   } catch (err) {
-    console.error("Book info update error:", err);
+    console.error("Book update failed:", err);
   }
 }, [loadStudyLogs]);
+
 
 
   // ─────────────────────────────────────────────

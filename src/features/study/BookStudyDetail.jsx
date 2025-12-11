@@ -159,24 +159,32 @@ export default function BookStudyDetail({ logs = [], onBack, onUpdateBook, onIma
     const sId = session.id || session.sessionId;
     const dur = session.durationMin;
 
-    // 모달을 열 때 전달되는 데이터도 안전하게 한 번 더 확인
+    // safe parse authors
     const safeInfo = {
-        ...info,
-        bookAuthors: safeParseAuthors(info.bookAuthors),
-        sessionId: sId,
-        durationMin: dur
+      ...session.bookInfo,
+      bookAuthors: safeParseAuthors(session.bookInfo.bookAuthors),
+      sessionId: session.id,
+      durationMin: session.durationMin,
+
+      // 🔥🔥 가장 중요! 서버 전송에 필요한 logs를 포함시킴
+      logs: session.logs
     };
 
     setSelectedSession(safeInfo);
     setIsModalOpen(true);
   }, []);
 
-  const handleSave = (updatedInfo) => {
-    if (onUpdateBook && selectedSession) {
-      onUpdateBook(selectedSession.sessionId, updatedInfo);
-    }
-    setIsModalOpen(false);
-  };
+const handleSave = (updatedInfo) => {
+  if (onUpdateBook && selectedSession) {
+
+    const firstLog = selectedSession.logs[0];  // logs에서 대표 로그 추출
+
+    onUpdateBook(firstLog, updatedInfo);
+  }
+  setIsModalOpen(false);
+};
+
+
 
   const handleAIAnalyze = (e, log) => {
     e.stopPropagation();
