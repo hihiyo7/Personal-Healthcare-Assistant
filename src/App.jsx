@@ -8,7 +8,7 @@ import { useStudyLogs } from './features/study/hooks/useStudyLogs';
 
 // ====== 유틸리티 (Feature-based path) ======
 import { buildHydrationSummary } from './shared/utils/summaryBuilder';
-import { updateHistoryEntry } from './features/auth/utils/historyUtils';
+// import { updateHistoryEntry } from './features/auth/utils/historyUtils'; // 사용 안함
 import { calculateOverallScore } from './features/study/utils/studyCalculator';
 
 // ====== 컴포넌트 (Feature-based path) ======
@@ -72,12 +72,11 @@ export default function App() {
   const [showAchievement, setShowAchievement] = useState(false);
 
   // ─────────────────────────────────────────────
-  // 히스토리 업데이트 콜백 (중복 방지 강화)
+  // 히스토리 업데이트 콜백
   // ─────────────────────────────────────────────
   const handleHistoryUpdate = useCallback((date, totalWater, drinks, studyMinutes = 0) => {
     if (!currentUser) return;
     
-    // 빈 데이터 업데이트 방지 (선택 사항)
     if ((totalWater || 0) === 0 && (studyMinutes || 0) === 0) return;
 
     const waterGoal = currentUser.goals?.water || 2000;
@@ -86,7 +85,7 @@ export default function App() {
     const combinedScore = calculateOverallScore(totalWater, waterGoal, studyMinutes, studyGoal);
 
     const newEntry = {
-      date: date, // ✅ 인자로 넘어온 date 사용 (currentDate 사용 금지)
+      date: date, 
       score: combinedScore,
       water: totalWater,
       study: studyMinutes,
@@ -94,12 +93,10 @@ export default function App() {
       feedback: `물 ${totalWater}ml, 공부 ${studyMinutes}분`
     };
 
-    // ✅ 중복 방지 로직: 이미 해당 날짜가 있으면 덮어쓰고, 없으면 추가
     let updatedHistory = currentUser.history ? [...currentUser.history] : [];
     const existingIndex = updatedHistory.findIndex(h => h.date === date);
 
     if (existingIndex !== -1) {
-      // 기존 데이터와 비교하여 변경점이 없으면 리턴 (무한 루프 방지 2차 방어선)
       const existing = updatedHistory[existingIndex];
       if (
         existing.water === newEntry.water &&
@@ -117,35 +114,37 @@ export default function App() {
       updatedHistory.push(newEntry);
     }
     
-    // 실제 변경이 있을 때만 updateHistory 호출
     if (JSON.stringify(currentUser.history) !== JSON.stringify(updatedHistory)) {
       updateHistory(updatedHistory);
     }
   }, [currentUser, updateHistory]);
 
   // ─────────────────────────────────────────────
-  // Study 로그 훅 사용
+  // Study 로그 훅 사용 [FIX: 중요 수정]
   // ─────────────────────────────────────────────
   const {
     bookLogs,
     laptopLogs,
-    todayBookLogs,
-    todayLaptopLogs,
+    // todayBookLogs, // (필요 없으면 삭제)
+    // todayLaptopLogs, // (필요 없으면 삭제)
     totalStudyMin,
     totalBookMin,
     totalLaptopStudyMin,
     totalLaptopNonStudyMin,
     hasServerData: hasStudyData,
-    updateBookLog,
-    updateLaptopLog,
-    updateBookWithInfo,
-    updateBookPages
+    
+    // [FIX] 여기서 정확한 함수명을 꺼내야 합니다.
+    handleUpdateBookInfo,  // 책 정보 저장 함수
+    handleManualLogUpdate: updateLaptopLog, // 랩탑용 수정 함수 (이름 매핑)
+    
+    // [FIX] Study용 이미지 분석 함수 (이름 충돌 방지 위해 별칭 사용)
+    handleImageAnalysis: handleStudyImageAnalysis 
   } = useStudyLogs(currentDate);
 
-  // ✅ [수정] studySummary를 useMemo로 감싸서 참조값 변경으로 인한 무한 루프 방지
   const studySummary = useMemo(() => ({
     totalStudyMin,
     totalBookMin,
+    bookLogs,
     totalLaptopMin: totalLaptopStudyMin,
     totalLaptopStudyMin,
     totalLaptopNonStudyMin,
@@ -162,8 +161,8 @@ export default function App() {
     aiSummary,
     aiLoading,
     loading,
-    handleImageAnalysis,
-    handleManualLogUpdate,
+    handleImageAnalysis, // Water용 이미지 분석
+    handleManualLogUpdate, // Water용 수동 수정
     clearLogs,
     fetchAISummary
   } = useWaterLogs(currentDate, currentUser, handleHistoryUpdate, studySummary, bookLogs, laptopLogs);
@@ -177,7 +176,7 @@ export default function App() {
   }, [view, currentDate]);
 
   // ─────────────────────────────────────────────
-  // 로그인/회원가입/로그아웃 등 핸들러
+  // 핸들러들
   // ─────────────────────────────────────────────
   const onLogin = (id, pw) => {
     const success = handleLogin(id, pw);
@@ -306,8 +305,8 @@ export default function App() {
                   stats={stats}
                   user={currentUser}
                   onBack={() => setView("dashboard")}
-                  onImageAnalysis={handleImageAnalysis}
-                  onManualEdit={handleManualLogUpdate}
+                  onImageAnalysis={handleImageAnalysis} // Water 분석
+                  onManualEdit={handleManualLogUpdate} // Water 수정
                   isDarkMode={isDarkMode}
                 />
               )}
@@ -323,12 +322,16 @@ export default function App() {
                 />
               )}
 
+              {/* [FIX] BookStudyDetail 연결부 수정 */}
               {view === "detail-study-book" && (
                 <BookStudyDetail
                   logs={bookLogs}
                   isDarkMode={isDarkMode}
-                  onUpdateLog={updateBookLog}
                   onBack={() => setView("detail-study")}
+                  // [중요] 저장 함수 연결 (onUpdateLog -> onUpdateBook)
+                  onUpdateBook={handleUpdateBookInfo} 
+                  // [중요] AI 분석 함수 연결
+                  onImageAnalysis={handleStudyImageAnalysis} 
                 />
               )}
 

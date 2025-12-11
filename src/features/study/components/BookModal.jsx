@@ -1,14 +1,16 @@
 // src/components/BookModal.jsx
 // ============================================================
-// Book 상세 입력 모달
-// - 책 검색 (Google Books API)
-// - 읽은 페이지 입력
-// - 진행률 계산
+// Book 상세 입력 모달 (통합 수정본)
+// - 기존 기능 완벽 유지 (경로, UI, 로직)
+// - [추가] 독서 시간 수정 기능
+// - [추가] 이미지 표시 및 AI 분석 트리거
+// - [추가] 이미지 확대 보기
 // ============================================================
 
 import React, { useState, useCallback, useEffect } from 'react';
 import ReactDOM from 'react-dom';
-import { X, Search, BookOpen, Loader2, ExternalLink, GraduationCap, Book, Clock, History } from 'lucide-react';
+import { X, Search, BookOpen, Loader2, ExternalLink, GraduationCap, Book, Clock, History, Sparkles, ZoomIn } from 'lucide-react';
+// [중요] 경로는 원래대로 유지
 import { searchBooks } from '../utils/bookApi';
 import { calculateBookProgress, BOOK_PURPOSES } from '../utils/studyCalculator';
 
@@ -80,9 +82,10 @@ const deleteRecentBook = (bookId) => {
  * @property {(updates: Object) => void} onSave - 저장 핸들러
  * @property {() => void} onClose - 닫기 핸들러
  * @property {boolean} isDarkMode - 다크모드 여부
+ * @property {(log: Object) => void} onAnalyzeImage - AI 분석 핸들러 (추가됨)
  */
 
-export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) {
+export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode, onAnalyzeImage }) {
   // ─────────────────────────────────────────────
   // 상태
   // ─────────────────────────────────────────────
@@ -104,12 +107,31 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
   const [readPages, setReadPages] = useState(log?.readPages || 0);
   const [purpose, setPurpose] = useState(log?.purpose || 'study'); // 'study' | 'etc'
   
-  // 최근 읽은 책 목록 로드
+  // [추가] 시간 수정 및 이미지 상태
+  const [durationMin, setDurationMin] = useState(0);
+  const [isImageExpanded, setIsImageExpanded] = useState(false);
+
+  // 초기 데이터 로드
   useEffect(() => {
     if (isOpen) {
       setRecentBooks(getRecentBooks());
+      if (log) {
+        // [중요] 기존 로그 데이터가 있으면 상태 업데이트
+        setSelectedBook({
+            bookId: log.bookId || '',
+            bookTitle: log.bookTitle || '',
+            bookAuthors: log.bookAuthors || [],
+            bookThumbnail: log.bookThumbnail || '',
+            totalPages: log.totalPages || 0,
+            description: log.description || ''
+        });
+        setReadPages(log.readPages || 0);
+        setPurpose(log.purpose || 'study');
+        // [추가] 시간 데이터 로드
+        setDurationMin(parseFloat(log.durationMin) || 0);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, log]);
 
   // 스타일
   const modalBg = isDarkMode ? 'bg-slate-800' : 'bg-white';
@@ -184,7 +206,7 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
   // 최근 책 삭제
   // ─────────────────────────────────────────────
   const handleDeleteRecentBook = (e, bookId) => {
-    e.stopPropagation(); // 버튼 클릭이 부모 요소로 전파되지 않도록
+    e.stopPropagation(); 
     const updatedBooks = deleteRecentBook(bookId);
     setRecentBooks(updatedBooks);
   };
@@ -207,7 +229,8 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
       ...selectedBook,
       readPages,
       progress,
-      purpose // study | etc
+      purpose, // study | etc
+      durationMin: parseFloat(durationMin) // [추가] 수정된 시간 저장
     });
     
     onClose();
@@ -216,9 +239,12 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
   // 진행률 계산
   const progress = calculateBookProgress(readPages, selectedBook.totalPages);
 
+  // [추가] 이미지 URL (로그에서 가져오기)
+  const imageUrl = log?.imageUrl || log?.captureUrl || log?.imageFile;
+
   const modalContent = (
     <div 
-      className="fixed inset-0 flex items-center justify-center z-[9999] p-4"
+      className="fixed inset-0 flex items-center justify-center z-[9999] p-4 bg-black/50 backdrop-blur-sm"
       onClick={onClose}
     >
       <div 
@@ -248,9 +274,72 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
           )}
         </div>
 
+
+        
+
         <div className="p-4 space-y-4">
+          
+          {/* [추가] 이미지 & AI 분석 섹션 */}
+          {imageUrl && (
+            <div className={`p-3 rounded-xl border ${isDarkMode ? 'border-slate-700 bg-slate-800/50' : 'border-slate-200 bg-slate-50'}`}>
+              <div className="flex gap-3">
+                {/* 이미지 썸네일 (클릭 시 확대) */}
+                <div 
+                  className="relative w-20 h-20 rounded-lg overflow-hidden cursor-pointer group flex-shrink-0 border border-slate-300 dark:border-slate-600 bg-black"
+                  onClick={() => setIsImageExpanded(true)}
+                >
+                  <img src={imageUrl} alt="Log capture" className="w-full h-full object-contain" />
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <ZoomIn className="text-white" size={20} />
+                  </div>
+                </div>
+
+                <div className="flex-1 flex flex-col justify-center">
+                  <div className="flex justify-between items-start mb-2">
+                    <p className={`text-xs font-bold ${textSecondary}`}>AI 이미지 분석</p>
+                    {/* 분석 상태 표시 */}
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${log?.aiResult ? 'bg-blue-100 text-blue-600' : 'bg-slate-200 text-slate-500'}`}>
+                      {log?.aiResult ? '완료됨' : '미완료'}
+                    </span>
+                  </div>
+                  
+                  <button 
+                    onClick={() => onAnalyzeImage && onAnalyzeImage(log)}
+                    className={`flex items-center justify-center gap-1.5 w-full py-1.5 rounded-lg text-xs font-bold transition ${
+                       isDarkMode 
+                       ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30' 
+                       : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                    }`}
+                  >
+                    <Sparkles size={14} /> 
+                    {log?.aiResult ? '다시 분석하기' : 'AI 분석 실행'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* [추가] 독서 시간 수정 섹션 */}
+          <div>
+            <label className={`text-xs font-semibold uppercase tracking-wider mb-1.5 block ${textSecondary}`}>
+              독서 시간 (분)
+            </label>
+            <div className="relative">
+              <Clock size={16} className={`absolute left-3 top-3 ${textSecondary}`} />
+              <input
+                type="number"
+                value={durationMin}
+                onChange={(e) => setDurationMin(e.target.value)}
+                className={`w-full pl-9 pr-3 py-2.5 rounded-xl border outline-none transition text-sm font-bold ${inputStyle}`}
+                placeholder="0"
+              />
+            </div>
+          </div>
+
+          <hr className={`border-t ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`} />
+
           {/* 최근 읽은 책 섹션 (책이 아직 선택되지 않았을 때만 표시) */}
-          {!selectedBook.bookTitle && recentBooks.length > 0 && (
+          {recentBooks.length > 0 && (
             <div>
               <label className={`text-xs font-semibold uppercase tracking-wider mb-1.5 flex items-center gap-2 ${textSecondary}`}>
                 <History size={12} />
@@ -500,18 +589,6 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
               </div>
             </div>
           )}
-
-          {/* 공부 시간 표시 */}
-          {log?.durationMin > 0 && (
-            <div className={`p-3 rounded-xl ${cardBg}`}>
-              <div className="flex justify-between items-center">
-                <span className={`text-xs font-medium ${textSecondary}`}>기록된 독서 시간</span>
-                <span className={`text-sm font-bold text-blue-500`}>
-                  {log.durationMin}분
-                </span>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* 하단 버튼 */}
@@ -534,10 +611,28 @@ export default function BookModal({ isOpen, log, onSave, onClose, isDarkMode }) 
           </div>
         </div>
       </div>
+
+      {/* [추가] 이미지 확대 모달 */}
+      {isImageExpanded && imageUrl && (
+        <div 
+            className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/90 p-4"
+            onClick={() => setIsImageExpanded(false)}
+        >
+          <img 
+            src={imageUrl} 
+            className="max-w-full max-h-full object-contain rounded-lg" 
+            alt="Expanded" 
+          />
+          <button 
+            className="absolute top-4 right-4 text-white bg-white/20 p-2 rounded-full hover:bg-white/30 backdrop-blur-sm"
+          >
+            <X size={24}/>
+          </button>
+        </div>
+      )}
     </div>
   );
 
   // Portal로 body에 직접 렌더링
   return ReactDOM.createPortal(modalContent, document.body);
 }
-

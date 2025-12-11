@@ -1,12 +1,9 @@
 // src/hooks/useWaterLogs.js
-// 수정 내용:
-// 1. 시간 파싱 로직 강화 (00:00 문제 해결)
-// 2. 이미지 파일명 추출 로직 강화 (분석 오류 해결)
-// 3. 사용자 라벨(My Label) 저장 및 우선순위 적용
-
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { generateAISummary } from '../../../shared/services/apiService';
 import { calculateLogStats } from '../utils/logProcessor';
 
+// 백엔드 서버 주소
 const API_BASE_URL = 'http://localhost:8000';
 
 export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySummary) => {
@@ -20,41 +17,10 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
   const currentDateRef = useRef(currentDate);
   const currentUserRef = useRef(currentUser);
 
+  // currentUser 업데이트
   useEffect(() => {
     currentUserRef.current = currentUser;
   }, [currentUser]);
-
-  // [헬퍼 함수] 시간 문자열에서 HH:MM 추출 (강력한 파싱)
-  const extractTimeFromTimestamp = (ts) => {
-    if (!ts) return "00:00";
-    try {
-      // 1. "2024-05-20T14:30:00" 형식 (ISO)
-      if (ts.includes('T')) {
-        return ts.split('T')[1].substring(0, 5);
-      }
-      // 2. "2024-05-20 14:30:00" 형식 (공백 구분)
-      if (ts.includes(' ')) {
-        const parts = ts.split(' ');
-        if (parts.length > 1) return parts[1].substring(0, 5);
-      }
-      // 3. 이미 "14:30" 형식인 경우
-      if (ts.includes(':')) {
-        return ts.substring(0, 5);
-      }
-      return "00:00";
-    } catch (e) {
-      console.warn("Time parse error:", ts);
-      return "00:00";
-    }
-  };
-
-  // [헬퍼 함수] URL이나 경로에서 파일명만 안전하게 추출
-  const extractFilename = (pathOrUrl) => {
-    if (!pathOrUrl) return null;
-    // 윈도우(\) 또는 유닉스(/) 경로 구분자 모두 처리
-    const cleanPath = pathOrUrl.replace(/\\/g, '/');
-    return cleanPath.split('/').pop();
-  };
 
   // 1. 로그 불러오기
   const loadLogs = useCallback(async () => {
@@ -65,42 +31,37 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
       setLoading(true);
       setAiSummary(null);
 
+      // 서버 API 호출
       const response = await fetch(`${API_BASE_URL}/api/logs/water/${fetchDate}`);
       if (!response.ok) throw new Error('서버 연결 실패');
 
       const rawData = await response.json();
 
+      // 요청 보낸 날짜와 현재 날짜가 다르면 무시 (비동기 꼬임 방지)
       if (fetchDate !== currentDateRef.current) return;
 
-      const formatted = rawData.map(item => {
-        // [수정] 시간 파싱 강화
-        const displayTime = item.time ? item.time.substring(0, 5) : extractTimeFromTimestamp(item.timestamp);
-        
-        // [수정] 이미지 URL 및 파일명 처리
-        const imgUrl = item.imageUrl || item.capture_path || null;
-        const fName = extractFilename(imgUrl);
-
-        return {
-          id: item.id,
-          time: displayTime,
-          amount: parseInt(item.amount) || 200,
-          imageUrl: imgUrl, 
-          imageFile: fName, // 분석 요청 시 사용할 파일명
-          aiResult: item.ai_result === "Not Analyzed" ? "" : item.ai_result,
-          userLabel: item.manual_label || "", 
-          isAnalyzing: false,
-          analyzed: item.ai_result !== "Not Analyzed"
-        };
-      });
-
-      console.log("[DEBUG] Loaded Logs:", formatted); // 콘솔에서 시간 확인용
+      // 데이터 가공
+      const formatted = rawData.map(item => ({
+        id: item.id,
+        time: item.time || item.timestamp?.split('T')[1]?.slice(0, 5) || "00:00",
+        amount: item.amount || 200,
+        imageUrl: item.imageUrl || null, 
+        // 이미지 파일명이 없으면 URL에서 추출 (분석 요청용)
+        imageFile: item.imageFile || (item.imageUrl ? item.imageUrl.split('/').pop() : null),
+        aiResult: item.ai_result === "Not Analyzed" ? "" : item.ai_result,
+        userLabel: item.manual_label || "", // 초기 로드 시 DB값 (현재는 빈값일 수 있음)
+        isAnalyzing: false,
+        analyzed: item.ai_result !== "Not Analyzed"
+      }));
 
       setLogs(formatted);
 
+      // 통계 계산
       const { waterMl, drinkCount: drinks } = calculateLogStats(formatted);
       setStats({ waterMl, studyMin: 0, calories: 0 });
       setDrinkCount(drinks);
 
+      // 대시보드 히스토리 업데이트용 콜백
       const studyMinutes = studySummary?.totalStudyMin || 0;
       if (onHistoryUpdate) {
         onHistoryUpdate(fetchDate, waterMl, drinks, studyMinutes);
@@ -114,6 +75,7 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
     }
   }, [currentDate, onHistoryUpdate, studySummary]);
 
+  // 날짜 변경 시 자동 로드
   useEffect(() => {
     currentDateRef.current = currentDate;
     loadLogs();
@@ -121,21 +83,21 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
 
   // 2. 이미지 분석 함수
   const handleImageAnalysis = async (logId, imageFile) => {
-    // 인자로 파일명이 안 넘어왔으면 로그 리스트에서 다시 찾기
+    // 파일명 확보 (인자가 없으면 logs 상태에서 찾기)
     let targetFilename = imageFile;
     if (!targetFilename) {
         const log = logs.find(l => l.id === logId);
-        if (log) {
-            targetFilename = log.imageFile || extractFilename(log.imageUrl);
+        if (log && log.imageUrl) {
+            targetFilename = log.imageUrl.split('/').pop();
         }
     }
 
     if (!targetFilename) {
-      alert(`분석할 이미지를 찾을 수 없습니다. (ID: ${logId})`);
+      alert("분석할 이미지를 찾을 수 없습니다.");
       return;
     }
 
-    // 로딩 표시
+    // 로딩 상태 켜기
     setLogs(prev => prev.map(l => l.id === logId ? { ...l, isAnalyzing: true } : l));
 
     try {
@@ -143,7 +105,7 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-            image_filename: targetFilename, // 추출된 파일명 전송
+            image_filename: targetFilename,
             log_id: logId 
         })
       });
@@ -154,11 +116,12 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
       setLogs(prev => {
         const updated = prev.map(l => {
           if (l.id === logId) {
+            // 결과 텍스트 파싱
             const isDrinkDetected = !resultText.toLowerCase().includes("water");
             const autoResult = isDrinkDetected ? "Drink Detected" : "Water Verified";
             return {
               ...l,
-              aiResult: autoResult,
+              aiResult: autoResult, // AI 결과 업데이트
               isAnalyzing: false,
               analyzed: true
             };
@@ -176,12 +139,12 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
 
     } catch (err) {
       console.error(err);
-      alert("AI 분석 서버 연결 실패");
+      alert("AI 분석 실패");
       setLogs(prev => prev.map(l => l.id === logId ? { ...l, isAnalyzing: false } : l));
     }
   };
 
-  // 3. 수동 수정 함수
+  // 3. 수동 수정 함수 (userLabel 저장)
   const handleManualLogUpdate = (logId, newTime, newAmount, newAiResult, newUserLabel) => {
     setLogs(prevLogs => {
         const updatedLogs = prevLogs.map(log => {
@@ -191,12 +154,13 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
                     time: newTime,
                     amount: parseInt(newAmount) || 0,
                     aiResult: newAiResult,
-                    userLabel: newUserLabel // 사용자 입력값 반영
+                    userLabel: newUserLabel // 여기가 중요: 사용자 입력값 저장
                 };
             }
             return log;
         });
 
+        // 통계 즉시 갱신
         const { waterMl, drinkCount: drinks } = calculateLogStats(updatedLogs);
         setStats(prev => ({ ...prev, waterMl }));
         setDrinkCount(drinks);
@@ -205,38 +169,22 @@ export const useWaterLogs = (currentDate, currentUser, onHistoryUpdate, studySum
     });
   };
 
-
-  // 4. AI 요약
+  // 4. AI 요약 생성
   const fetchAISummary = useCallback(async () => {
     if (aiLoading) return;
     try {
       setAiLoading(true);
       setAiSummary("AI가 오늘 하루를 정리 중이에요…");
+      
       const summaryData = {
         date: currentDate,
         waterMl: stats.waterMl,
         waterGoal: currentUser?.goals?.water || 2000,
         studyMin: studySummary?.totalStudyMin || 0,
         studyGoal: currentUser?.goals?.study || 300,
-
-        // ✅ 여기 핵심
-        bookInfo: studySummary?.bookLogs?.length > 0
-          ? {
-              title: studySummary.bookLogs[0].bookTitle,
-              authors: studySummary.bookLogs[0].bookAuthors
-                ? studySummary.bookLogs[0].bookAuthors.split(',').map(a => a.trim())
-                : [],
-              readPages: studySummary.bookLogs[0].readPages,
-              totalPages: studySummary.bookLogs[0].totalPages,
-              durationMin: studySummary.totalBookMin,
-              description: studySummary.bookLogs[0].description,
-              purpose: studySummary.bookLogs[0].purpose || 'study',
-            }
-          : null,
-
+        bookInfo: null, 
         laptopInfo: null,
       };
-
 
       const response = await fetch(`${API_BASE_URL}/api/summary`, {
         method: 'POST',

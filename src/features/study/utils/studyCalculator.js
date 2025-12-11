@@ -133,8 +133,11 @@ const finalizeSession = (session) => {
  */
 export const calculateSessionBasedTime = (logs) => {
   const sessions = groupLogsIntoSessions(logs);
-  return sessions.reduce((sum, s) => sum + s.durationMin, 0);
+  const total = sessions.reduce((sum, s) => sum + s.durationMin, 0);
+
+  return Math.round(total * 10) / 10; // ✅ 소수 1자리로 고정
 };
+
 
 /**
  * Book 로그에서 공부 시간 계산 (세션 기반)
@@ -214,15 +217,23 @@ export const calculateOverallScore = (waterMl, waterGoal, studyMin, studyGoal) =
  */
 export const formatMinutesToTime = (minutes) => {
   if (!minutes || minutes <= 0) return '0분';
-  
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  
+
+  // 혹시 들어온 값이 소수라도 1자리까지만 사용
+  const safeMinutes = Math.round(minutes * 10) / 10;
+
+  const hours = Math.floor(safeMinutes / 60);
+  const minsRaw = safeMinutes % 60;
+  const mins = Math.round(minsRaw * 10) / 10; // 분도 한 번 더 정리
+
   if (hours > 0) {
+    // 예: 1시간 0.5분 이런 거 나오면 1시간 0.5분으로, 분이 0이면 시간만
     return mins > 0 ? `${hours}시간 ${mins}분` : `${hours}시간`;
   }
+
+  // 여기 때문에 0.8999999분이 그대로 찍혔던 거
   return `${mins}분`;
 };
+
 
 /**
  * 카테고리별 Laptop 시간 집계
@@ -262,7 +273,10 @@ export const generateRadarData = ({
   dietScore = 0,
   dietGoal = 100
 }) => {
-  const calc = (value, goal) => goal > 0 ? Math.min((value / goal) * 100, 100) : 0;
+  const calc = (value, goal) =>
+    goal > 0
+      ? Math.min(Math.round((value / goal) * 1000) / 10, 100)
+      : 0;
   
   return [
     { subject: 'Water', A: calc(waterMl, waterGoal), fullMark: 100 },

@@ -31,7 +31,7 @@ export default function Dashboard({
   onFileUpload, 
   onNavigate, 
   isDarkMode,
-  studySummary = { totalStudyMin: 0, totalBookMin: 0, totalLaptopMin: 0, totalLaptopNonStudyMin: 0 },
+  studySummary = { totalStudyMin: 0, totalBookMin: 0, totalLaptopMin: 0,totalLaptopNonStudyMin: 0 },
   onGenerateAISummary,
   onResetDay
 }) {

@@ -1,6 +1,6 @@
 // src/services/apiService.js
 // ============================================================
-// API 서비스 - 서버 통신 담당
+// API 서비스 - 서버 통신 담당 (수정됨)
 // ============================================================
 
 const API_BASE_URL = "http://localhost:8000";
@@ -64,23 +64,37 @@ export const analyzeDrinkImage = async (logId, imageFilename) => {
 // 4. AI Daily Summary 생성 요청 (Gemini API)
 export const generateAISummary = async (data) => {
   try {
+    // [수정 포인트] 서버가 float 타입을 기대하므로 확실하게 숫자형으로 변환해서 전송
+    const payload = {
+      date: data.date,
+      waterMl: Number(data.waterMl) || 0,
+      waterGoal: Number(data.waterGoal) || 2000,
+      studyMin: Number(data.studyMin) || 0,
+      studyGoal: Number(data.studyGoal) || 300,
+      
+      // 책 정보가 있을 때만 전송, 숫자형 필드 변환
+      bookInfo: data.bookInfo ? {
+          ...data.bookInfo,
+          readPages: Number(data.bookInfo.readPages) || 0,
+          totalPages: Number(data.bookInfo.totalPages) || 0,
+          durationMin: Number(data.bookInfo.durationMin) || 0,
+      } : null,
+      
+      // 노트북 정보가 있을 때만 전송, 숫자형 필드 변환
+      laptopInfo: data.laptopInfo ? {
+          ...data.laptopInfo,
+          durationMin: Number(data.laptopInfo.durationMin) || 0,
+      } : null
+    };
+
     const response = await fetch(`${API_BASE_URL}/api/summary`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        date: data.date,
-        waterMl: data.waterMl,
-        waterGoal: data.waterGoal,
-        studyMin: data.studyMin,
-        studyGoal: data.studyGoal,
-        // 책 정보 추가
-        bookInfo: data.bookInfo || null,
-        laptopInfo: data.laptopInfo || null
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      console.warn("AI Summary 생성 실패");
+      console.warn("AI Summary 생성 실패: 서버 응답 오류");
       return null;
     }
 
