@@ -27,7 +27,7 @@ export const useAuth = () => {
     // 기본 사용자
     return [{
       id: 'admin',
-      pw: '1234',
+      pw: '5678',
       name: 'Gaeun Seo',
       goals: { water: 2000, study: 300, calories: 1800 },
       history: generatePastHistory(7)

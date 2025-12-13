@@ -32,7 +32,7 @@ export default function CalendarView({ history, goals, onDateClick, isDarkMode }
   return (
     <div className={containerStyle}>
       <div className="flex justify-between items-center mb-6">
-        <h3 className={`text-lg font-bold ${headerTextStyle}`}>Monthly Tracker</h3>
+        <h3 className={`text-lg font-bold ${headerTextStyle}`}>Calendar</h3>
         <div className={`flex items-center gap-4 font-bold ${subTextStyle}`}>
           <button onClick={prevMonth} className={iconButtonStyle}><ChevronLeft size={20}/></button>
           <span>{monthNames[month]} {year}</span>

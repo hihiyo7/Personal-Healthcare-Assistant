@@ -39,6 +39,8 @@ export default function Dashboard({
   const isToday = currentDate === todayIso;
   const isFuture = currentDate > todayIso;
   const uploadDisabled = isFuture;
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
 
   // DatePicker 컴포넌트로 이동됨
 
@@ -129,13 +131,14 @@ export default function Dashboard({
             {/* 기록 초기화 버튼 (위치 이동) */}
             {!isFuture && (
               <button
-                onClick={() => onResetDay && onResetDay(currentDate)}
+                onClick={() => setShowResetConfirm(true)}
                 className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition ${
                   isDarkMode ? 'text-slate-400 hover:text-red-400' : 'text-slate-500 hover:text-red-500'
                 }`}
               >
                 <Trash2 size={12} /> 날짜 초기화
               </button>
+
             )}
             {uploadDisabled && <p className={`text-[9px] mt-1.5 text-center ${textSecondary}`}>미래 날짜 불가</p>}
           </div>

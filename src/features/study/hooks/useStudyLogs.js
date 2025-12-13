@@ -1,15 +1,13 @@
 // src/features/study/hooks/useStudyLogs.js
 // ============================================================
-// Study 로그 관리 커스텀 훅 (FINAL SAVE FIX)
+// Study 로그 훅 (FINAL SAVE FIX + row_index 지원)
 // ============================================================
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
-// 백엔드 주소
 const API_BASE_URL = 'http://localhost:8000';
 
 export const useStudyLogs = (currentDate, onLogsLoaded) => {
-
   const [studySummaryText, setStudySummaryText] = useState(null);
   const [studySummaryLoading, setStudySummaryLoading] = useState(false);
 
@@ -22,89 +20,95 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
 
   const currentDateRef = useRef(currentDate);
 
-  // ─────────────────────────────────────────────
-  // 1. 로그 로드
-  // ─────────────────────────────────────────────
-  const loadStudyLogs = useCallback(async (fetchDate) => {
-    setLoading(true);
-    setError(null);
+  // 1. Study 로그 로드
+  const loadStudyLogs = useCallback(
+    async (fetchDate) => {
+      setLoading(true);
+      setError(null);
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/logs/study/${fetchDate}`);
-      if (!response.ok) throw new Error('서버 연결 실패');
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/logs/study/${fetchDate}`);
+        if (!response.ok) throw new Error('서버 응답 오류');
 
-      const data = await response.json();
-      if (fetchDate !== currentDateRef.current) return;
+        const data = await response.json();
+        if (fetchDate !== currentDateRef.current) return;
 
-      const { logs, totalBookMin, totalLaptopMin } = data;
+        const { logs, totalBookMin, totalLaptopMin } = data;
 
-      const processedLogs = (logs || []).map(log => ({
-        id: log.id,
-        bookId: log.book_id || "",   // ✅ 이 줄 추가
+        const processedLogs = (logs || []).map((log) => ({
+          // UI용 고유 ID (서버에서 내려주는 id)
+          id: log.id,
+          // CSV 파일 내부 행 인덱스 (server.merge_csv_files에서 row_index로 내려줌)
+          rowIndex: log.row_index ?? log.rowIndex ?? null,
 
-        type: (log.object || 'laptop').toLowerCase().includes('book') ? 'book' : 'laptop',
-        timestamp: log.timestamp || "",
-        time: log.time || (log.timestamp ? log.timestamp.split('T')[1]?.slice(0, 5) : "00:00"),
+          type: (log.object || 'laptop').toLowerCase().includes('book') ? 'book' : 'laptop',
 
-        durationMin: log.duration_min || 0,
-        imageUrl: log.imageUrl || null,
-        imageFile: log.imageUrl ? log.imageUrl.split('/').pop() : null,
+          bookId: log.book_id || '',
+          timestamp: log.timestamp || '',
+          time:
+            log.time ||
+            (log.timestamp ? log.timestamp.split('T')[1]?.slice(0, 5) : '00:00'),
 
-        aiResult: log.ai_result === "Not Analyzed" ? "" : log.ai_result,
-        userLabel: log.manual_label || "",
+          durationMin: log.duration_min || 0,
+          imageUrl: log.imageUrl || null,
+          imageFile: log.imageUrl ? log.imageUrl.split('/').pop() : null,
 
-        bookTitle: log.book_title || "",
-        bookAuthors: log.book_authors || "",
-        bookThumbnail: log.book_thumbnail || "",
-        readPages: log.read_pages || 0,
-        totalPages: log.total_pages || 0,
-        description: log.description || "",
-        purpose: log.purpose || "study",
+          aiResult: log.ai_result === 'Not Analyzed' ? '' : log.ai_result,
+          userLabel: log.manual_label || '',
 
-        sourceFile: log.source_file || log.sourceFile || "",
-        category: log.category || "lecture",
+          bookTitle: log.book_title || '',
+          bookAuthors: log.book_authors || '',
+          bookThumbnail: log.book_thumbnail || '',
+          readPages: log.read_pages || 0,
+          totalPages: log.total_pages || 0,
+          description: log.description || '',
+          purpose: log.purpose || 'study',
 
-        isAnalyzing: false,
-        analyzed: log.ai_result !== "Not Analyzed",
-      }));
+          sourceFile: log.source_file || log.sourceFile || '',
+          category: log.category || 'lecture',
 
-      setStudyLogs(processedLogs);
-      setServerTotalBookMin(totalBookMin || 0);
-      setServerTotalLaptopMin(totalLaptopMin || 0);
+          isAnalyzing: false,
+          analyzed: log.ai_result !== 'Not Analyzed',
+        }));
 
-      onLogsLoaded?.(processedLogs);
+        setStudyLogs(processedLogs);
+        setServerTotalBookMin(totalBookMin || 0);
+        setServerTotalLaptopMin(totalLaptopMin || 0);
 
-    } catch (err) {
-      console.error(err);
-      setError(err.message);
-      setStudyLogs([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [onLogsLoaded]);
+        onLogsLoaded?.(processedLogs);
+      } catch (err) {
+        console.error(err);
+        setError(err.message);
+        setStudyLogs([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [onLogsLoaded],
+  );
 
   useEffect(() => {
     currentDateRef.current = currentDate;
     loadStudyLogs(currentDate);
   }, [currentDate, loadStudyLogs]);
 
-  // ─────────────────────────────────────────────
-  // 2. 통계 계산 ✅ (⚠️ 먼저 선언)
-  // ─────────────────────────────────────────────
+  // 2. Laptop Study / Non-Study 합계 계산
   const { totalLaptopStudyMin, totalLaptopNonStudyMin } = useMemo(() => {
     let studyMin = 0;
     let nonStudyMin = 0;
 
-    studyLogs.filter(l => l.type === 'laptop').forEach(log => {
-      const label = (log.userLabel || log.aiResult || "Study").toLowerCase();
-      const duration = parseFloat(log.durationMin) || 0;
+    studyLogs
+      .filter((l) => l.type === 'laptop')
+      .forEach((log) => {
+        const label = (log.userLabel || log.aiResult || 'Study').toLowerCase();
+        const duration = parseFloat(log.durationMin) || 0;
 
-      if (label.includes('game') || label.includes('youtube') || label.includes('other')) {
-        nonStudyMin += duration;
-      } else {
-        studyMin += duration;
-      }
-    });
+        if (label.includes('game') || label.includes('youtube') || label.includes('other')) {
+          nonStudyMin += duration;
+        } else {
+          studyMin += duration;
+        }
+      });
 
     return {
       totalLaptopStudyMin: +studyMin.toFixed(1),
@@ -115,251 +119,246 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
   const totalBookMin =
     currentDate !== currentDateRef.current ? 0 : serverTotalBookMin;
 
-  const currentBookMin = useMemo(() => {
-    return studyLogs
-      .filter(l => l.type === 'book')
-      .reduce((acc, curr) => acc + (parseFloat(curr.durationMin) || 0), 0);
-  }, [studyLogs]);
+  const currentBookMin = useMemo(
+    () =>
+      studyLogs
+        .filter((l) => l.type === 'book')
+        .reduce((acc, curr) => acc + (parseFloat(curr.durationMin) || 0), 0),
+    [studyLogs],
+  );
 
   const displayTotalBookMin =
     currentBookMin > 0 ? +currentBookMin.toFixed(1) : totalBookMin;
 
   const totalStudyMin = displayTotalBookMin + totalLaptopStudyMin;
 
-const handleImageAnalysis = useCallback(async (logId, imageFile) => {
-  let targetFilename = imageFile;
+  // 3. 이미지 분석 (AI)
+  const handleImageAnalysis = useCallback(
+    async (logId, imageFile) => {
+      let targetFilename = imageFile;
 
-  // 로그에서 파일명 찾기
-  if (!targetFilename) {
-    const log = studyLogs.find(l => l.id === logId);
-    if (log) {
-      if (log.imageFile) {
-        targetFilename = log.imageFile;
-      } else if (log.imageUrl) {
-        const parts = log.imageUrl.split('/');
-        targetFilename = parts[parts.length - 1];
+      if (!targetFilename) {
+        const log = studyLogs.find((l) => l.id === logId);
+        if (log) {
+          if (log.imageFile) {
+            targetFilename = log.imageFile;
+          } else if (log.imageUrl) {
+            const parts = log.imageUrl.split('/');
+            targetFilename = parts[parts.length - 1];
+          }
+        }
       }
-    }
-  }
 
-  if (!targetFilename) {
-    alert('분석할 이미지 파일을 찾을 수 없습니다.');
-    return;
-  }
+      if (!targetFilename) {
+        alert('이미지 파일을 찾을 수 없습니다.');
+        return;
+      }
 
-  // 로딩 플래그 켜기
-  setStudyLogs(prev =>
-    prev.map(l =>
-      l.id === logId ? { ...l, isAnalyzing: true } : l
-    )
+      setStudyLogs((prev) =>
+        prev.map((l) =>
+          l.id === logId ? { ...l, isAnalyzing: true } : l,
+        ),
+      );
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image_filename: targetFilename,
+            log_id: logId,
+          }),
+        });
+
+        const data = await res.json();
+        const resultText = data.result || '';
+
+        setStudyLogs((prev) =>
+          prev.map((l) =>
+            l.id === logId
+              ? { ...l, aiResult: resultText, isAnalyzing: false, analyzed: true }
+              : l,
+          ),
+        );
+      } catch (e) {
+        console.error(e);
+        alert('AI 분석 오류');
+        setStudyLogs((prev) =>
+          prev.map((l) =>
+            l.id === logId ? { ...l, isAnalyzing: false } : l,
+          ),
+        );
+      }
+    },
+    [studyLogs],
   );
 
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image_filename: targetFilename,
-        log_id: logId,
-      }),
-    });
+  // 4. Study 요약 (책 기반)
+  const fetchStudySummary = useCallback(
+    async () => {
+      if (studySummaryLoading) return;
 
-    const data = await res.json();
-    const resultText = data.result || '';
+      const books = studyLogs.filter(
+        (l) => l.type === 'book' && l.bookId,
+      );
 
-    setStudyLogs(prev =>
-      prev.map(l =>
-        l.id === logId
-          ? { ...l, aiResult: resultText, isAnalyzing: false, analyzed: true }
-          : l
-      )
-    );
-  } catch (e) {
-    console.error(e);
-    alert('AI 분석 실패');
-    setStudyLogs(prev =>
-      prev.map(l =>
-        l.id === logId ? { ...l, isAnalyzing: false } : l
-      )
-    );
-  }
-}, [studyLogs]);
-
-
-
-
-// ─────────────────────────────────────────────
-// 3. 독서 요약 생성 ✅ (최종 수정본)
-// ─────────────────────────────────────────────
-const fetchStudySummary = useCallback(async () => {
-  if (studySummaryLoading) return;
-
-  const books = studyLogs.filter(
-    l => l.type === "book" && l.bookId
-  );
-
-  if (books.length === 0) {
-    setStudySummaryText("오늘은 독서 기록이 없어요.");
-    return;
-  }
-
-  // ✅ 가장 최근에 선택된 책
-  const mainBook = books[books.length - 1];
-
-  const bookInfo = {
-    title: mainBook.bookTitle,
-    authors: mainBook.bookAuthors
-      ? mainBook.bookAuthors.split(',').map(a => a.trim())
-      : [],
-    readPages: mainBook.readPages,
-    totalPages: mainBook.totalPages,
-    durationMin: displayTotalBookMin,
-    description: mainBook.description,
-    purpose: mainBook.purpose,
-  };
-
-  const payload = {
-    date: currentDate,
-    waterMl: 0,
-    waterGoal: 0,
-    studyMin: totalStudyMin,
-    studyGoal: 0,
-    bookInfo,
-    laptopInfo: null,
-  };
-
-  try {
-    setStudySummaryLoading(true);
-    setStudySummaryText("AI가 독서 요약을 정리 중입니다…");
-
-    const res = await fetch(`${API_BASE_URL}/api/summary`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await res.json();
-    setStudySummaryText(data.summary);
-
-  } catch (e) {
-    console.error(e);
-    setStudySummaryText("요약 생성 실패");
-  } finally {
-    setStudySummaryLoading(false);
-  }
-}, [
-  studyLogs,
-  displayTotalBookMin,
-  totalStudyMin,
-  currentDate,
-  studySummaryLoading
-]);
-// ─────────────────────────────────────────────
-// 4. 책 정보 업데이트 (BookModal → 서버 저장)
-
-
-const handleUpdateBookInfo = useCallback(async (log, updates) => {
-  try {
-    const payload = {
-      source_file: log.sourceFile,   // csv 파일
-      // 책 정보는 파일 전체 업데이트 → log_id는 "all"로 명시
-      log_id: "all",
-      updates: {
-        book_id: updates.bookId,
-        book_title: updates.bookTitle,
-        book_authors: Array.isArray(updates.bookAuthors)
-          ? updates.bookAuthors.join(',')
-          : updates.bookAuthors,
-        book_thumbnail: updates.bookThumbnail,
-        total_pages: updates.totalPages,
-        read_pages: updates.readPages,
-        description: updates.description || '',
-        purpose: updates.purpose || 'study',
-        duration_min: updates.durationMin,
+      if (books.length === 0) {
+        setStudySummaryText('요약할 책 공부 기록이 없습니다.');
+        return;
       }
-    };
 
-    const response = await fetch(`${API_BASE_URL}/api/logs/update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+      const mainBook = books[books.length - 1];
 
-    await loadStudyLogs(currentDateRef.current);
-
-  } catch (err) {
-    console.error("Book update failed:", err);
-  }
-}, [loadStudyLogs]);
-
-  // 5. Laptop 로그 수동 수정 (활동 분류/메모 등)
-  // - 서버 CSV(`/api/logs/update`) 저장 + 프론트 상태 동기화
-  const handleManualLogUpdate = useCallback(async (logId, updatesOrUserLabel) => {
-    const targetLog = studyLogs.find(l => l.id === logId);
-    if (!targetLog?.sourceFile) {
-      console.warn("[Study] Missing sourceFile for log:", logId);
-      return;
-    }
-
-    const updates =
-      typeof updatesOrUserLabel === 'string'
-        ? { userLabel: updatesOrUserLabel }
-        : (updatesOrUserLabel || {});
-
-    const nextCategory = updates.category ?? targetLog.category ?? 'lecture';
-    const nextUserLabel = String(updates.userLabel ?? updates.manualLabel ?? nextCategory);
-
-    // optimistic update (UI 즉시 반영)
-    setStudyLogs(prev =>
-      prev.map(l => {
-        if (l.id !== logId) return l;
-        return {
-          ...l,
-          category: nextCategory,
-          userLabel: nextUserLabel,
-          subject: updates.subject ?? l.subject,
-          note: updates.note ?? l.note,
-          durationMin:
-            updates.durationMin !== undefined && updates.durationMin !== null
-              ? updates.durationMin
-              : l.durationMin,
-        };
-      })
-    );
-
-    try {
-      const payload = {
-        source_file: targetLog.sourceFile,
-        log_id: logId,
-        updates: {
-          category: nextCategory,
-          manual_label: nextUserLabel,
-          subject: updates.subject,
-          note: updates.note,
-          duration_min: updates.durationMin,
-        },
+      const bookInfo = {
+        title: mainBook.bookTitle,
+        authors: mainBook.bookAuthors
+          ? mainBook.bookAuthors.split(',').map((a) => a.trim())
+          : [],
+        readPages: mainBook.readPages,
+        totalPages: mainBook.totalPages,
+        durationMin: displayTotalBookMin,
+        description: mainBook.description,
+        purpose: mainBook.purpose,
       };
 
-      const response = await fetch(`${API_BASE_URL}/api/logs/update`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      const payload = {
+        date: currentDate,
+        waterMl: 0,
+        waterGoal: 0,
+        studyMin: totalStudyMin,
+        studyGoal: 0,
+        bookInfo,
+        laptopInfo: null,
+      };
 
-      if (!response.ok) throw new Error('update failed');
+      try {
+        setStudySummaryLoading(true);
+        setStudySummaryText('AI가 책 공부 요약을 생성 중입니다...');
 
-      // 서버 저장 이후 재로딩으로 세션/집계 일관성 확보
-      await loadStudyLogs(currentDateRef.current);
-    } catch (err) {
-      console.error('Laptop log update failed:', err);
-    }
-  }, [studyLogs, loadStudyLogs]);
+        const res = await fetch(`${API_BASE_URL}/api/summary`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
 
+        const data = await res.json();
+        setStudySummaryText(data.summary);
+      } catch (e) {
+        console.error(e);
+        setStudySummaryText('요약 생성 중 오류가 발생했습니다.');
+      } finally {
+        setStudySummaryLoading(false);
+      }
+    },
+    [studyLogs, displayTotalBookMin, totalStudyMin, currentDate, studySummaryLoading],
+  );
 
+  // 5. Book 정보 일괄 업데이트 (BookModal)
+  const handleUpdateBookInfo = useCallback(
+    async (log, updates) => {
+      try {
+        const payload = {
+          source_file: log.sourceFile,
+          // 책 정보는 해당 CSV 전체에 반영
+          log_id: 'all',
+          updates: {
+            book_id: updates.bookId,
+            book_title: updates.bookTitle,
+            book_authors: Array.isArray(updates.bookAuthors)
+              ? updates.bookAuthors.join(',')
+              : updates.bookAuthors,
+            book_thumbnail: updates.bookThumbnail,
+            total_pages: updates.totalPages,
+            read_pages: updates.readPages,
+            description: updates.description || '',
+            purpose: updates.purpose || 'study',
+            duration_min: updates.durationMin,
+          },
+        };
 
-  // ─────────────────────────────────────────────
+        await fetch(`${API_BASE_URL}/api/logs/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        await loadStudyLogs(currentDateRef.current);
+      } catch (err) {
+        console.error('Book update failed:', err);
+      }
+    },
+    [loadStudyLogs],
+  );
+
+  // 6. Laptop 개별 로그/세션 업데이트
+  // - CSV(`/api/logs/update`) + 상태 동기화
+  const handleManualLogUpdate = useCallback(
+    async (logId, updatesOrUserLabel) => {
+      const targetLog = studyLogs.find((l) => l.id === logId);
+      if (!targetLog?.sourceFile) {
+        console.warn('[Study] Missing sourceFile for log:', logId);
+        return;
+      }
+
+      const updates =
+        typeof updatesOrUserLabel === 'string'
+          ? { userLabel: updatesOrUserLabel }
+          : updatesOrUserLabel || {};
+
+      const nextCategory = updates.category ?? targetLog.category ?? 'lecture';
+      const nextUserLabel = String(
+        updates.userLabel ?? updates.manualLabel ?? nextCategory,
+      );
+
+      // optimistic update (UI 즉시 반영)
+      setStudyLogs((prev) =>
+        prev.map((l) => {
+          if (l.id !== logId) return l;
+          return {
+            ...l,
+            category: nextCategory,
+            userLabel: nextUserLabel,
+            subject: updates.subject ?? l.subject,
+            note: updates.note ?? l.note,
+            durationMin:
+              updates.durationMin !== undefined && updates.durationMin !== null
+                ? updates.durationMin
+                : l.durationMin,
+          };
+        }),
+      );
+
+      try {
+        const payload = {
+          source_file: targetLog.sourceFile,
+          // CSV 파일 내부 행 인덱스를 우선 사용, 없으면 기존 id 사용
+          log_id: targetLog.rowIndex ?? logId,
+          updates: {
+            category: nextCategory,
+            manual_label: nextUserLabel,
+            subject: updates.subject,
+            note: updates.note,
+            duration_min: updates.durationMin,
+          },
+        };
+
+        const response = await fetch(`${API_BASE_URL}/api/logs/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) throw new Error('update failed');
+
+        await loadStudyLogs(currentDateRef.current);
+      } catch (err) {
+        console.error('Laptop log update failed:', err);
+      }
+    },
+    [studyLogs, loadStudyLogs],
+  );
+
   // return
-  // ─────────────────────────────────────────────
   return {
     studyLogs,
     loading,
@@ -374,17 +373,17 @@ const handleUpdateBookInfo = useCallback(async (log, updates) => {
     fetchStudySummary,
     handleUpdateBookInfo,
     handleManualLogUpdate,
-    handleImageAnalysis,  // ★ 추가
+    handleImageAnalysis,
 
     studySummaryText,
     studySummaryLoading,
 
-    bookLogs: studyLogs.filter(l => l.type === 'book'),
-    laptopLogs: studyLogs.filter(l => l.type === 'laptop'),
-
+    bookLogs: studyLogs.filter((l) => l.type === 'book'),
+    laptopLogs: studyLogs.filter((l) => l.type === 'laptop'),
 
     hasServerData: studyLogs.length > 0,
   };
 };
 
 export default useStudyLogs;
+

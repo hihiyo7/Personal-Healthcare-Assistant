@@ -142,6 +142,11 @@ def merge_csv_files(files: list) -> pd.DataFrame:
         try:
             df = pd.read_csv(f)
             if not df.empty:
+                # 각 원본 CSV 안에서의 로우 인덱스를 별도 컬럼으로 유지
+                # 여러 파일을 머지한 뒤에도 파일 내부 행 위치를 알기 위해 사용
+                if 'row_index' not in df.columns:
+                    df['row_index'] = range(len(df))
+
                 file_ts = parse_timestamp_from_filename(f)
                 if file_ts and 'timestamp' not in df.columns:
                     df['timestamp'] = file_ts

@@ -74,50 +74,61 @@ export default function App() {
   // ─────────────────────────────────────────────
   // 히스토리 업데이트 콜백
   // ─────────────────────────────────────────────
-  const handleHistoryUpdate = useCallback((date, totalWater, drinks, studyMinutes = 0) => {
-    if (!currentUser) return;
-    
-    if ((totalWater || 0) === 0 && (studyMinutes || 0) === 0) return;
+// 기존 함수 전체를 아래 코드로 교체
+const handleHistoryUpdate = useCallback((date, totalWater, studyMinutes = 0) => {
+  if (!currentUser) return;
 
-    const waterGoal = currentUser.goals?.water || 2000;
-    const studyGoal = currentUser.goals?.study || 300;
-    
-    const combinedScore = calculateOverallScore(totalWater, waterGoal, studyMinutes, studyGoal);
+  const water = totalWater || 0;
+  const study = studyMinutes || 0;
 
-    const newEntry = {
-      date: date, 
-      score: combinedScore,
-      water: totalWater,
-      study: studyMinutes,
-      calories: 0,
-      feedback: `물 ${totalWater}ml, 공부 ${studyMinutes}분`
+  const waterGoal = currentUser.goals?.water || 2000;
+  const studyGoal = currentUser.goals?.study || 300;
+
+  const combinedScore = calculateOverallScore(water, waterGoal, study, studyGoal);
+
+  const newEntry = {
+    date,
+    score: combinedScore,
+    water,
+    study,
+    calories: 0,
+    feedback: `오늘 물 ${water}ml, 공부 ${study}분`,
+  };
+
+  let updatedHistory = currentUser.history ? [...currentUser.history] : [];
+  const existingIndex = updatedHistory.findIndex((h) => h.date === date);
+  const hasExisting = existingIndex !== -1;
+
+  // 완전히 빈 날인데, 기존 히스토리도 없으면 새로 안 만든다
+  if (!hasExisting && water === 0 && study === 0) {
+    return;
+  }
+
+  if (hasExisting) {
+    const existing = updatedHistory[existingIndex];
+
+    // 값이 완전히 같으면 굳이 다시 저장 안 함
+    if (
+      existing.water === newEntry.water &&
+      existing.study === newEntry.study &&
+      existing.score === newEntry.score
+    ) {
+      return;
+    }
+
+    updatedHistory[existingIndex] = {
+      ...existing,
+      ...newEntry,
     };
+  } else {
+    updatedHistory.push(newEntry);
+  }
 
-    let updatedHistory = currentUser.history ? [...currentUser.history] : [];
-    const existingIndex = updatedHistory.findIndex(h => h.date === date);
+  if (JSON.stringify(currentUser.history) !== JSON.stringify(updatedHistory)) {
+    updateHistory(updatedHistory);
+  }
+}, [currentUser, updateHistory]);
 
-    if (existingIndex !== -1) {
-      const existing = updatedHistory[existingIndex];
-      if (
-        existing.water === newEntry.water &&
-        existing.study === newEntry.study &&
-        existing.score === newEntry.score
-      ) {
-        return; 
-      }
-
-      updatedHistory[existingIndex] = {
-        ...existing,
-        ...newEntry
-      };
-    } else {
-      updatedHistory.push(newEntry);
-    }
-    
-    if (JSON.stringify(currentUser.history) !== JSON.stringify(updatedHistory)) {
-      updateHistory(updatedHistory);
-    }
-  }, [currentUser, updateHistory]);
 
   // ─────────────────────────────────────────────
   // Study 로그 훅 사용 [FIX: 중요 수정]
@@ -157,6 +168,7 @@ export default function App() {
   const {
     logs,
     stats,
+    statsDate,
     drinkCount,
     aiSummary,
     aiLoading,
@@ -165,7 +177,20 @@ export default function App() {
     handleManualLogUpdate, // Water용 수동 수정
     clearLogs,
     fetchAISummary
-  } = useWaterLogs(currentDate, currentUser, handleHistoryUpdate, studySummary, bookLogs, laptopLogs);
+  } = useWaterLogs(currentDate, currentUser, null, studySummary);
+
+  // 물/공부 데이터가 모두 계산된 뒤 History를 갱신
+  useEffect(() => {
+    if (!currentUser) return;
+    // stats가 아직 다른 날짜 기준이면 history 업데이트 금지
+    if (!statsDate || statsDate !== currentDate) return;
+
+    const totalWater = stats.waterMl || 0;
+    const studyMinutes = totalStudyMin || 0;
+
+    // 완전히 비어 있는 날 + 기존 히스토리도 없는 날은 handleHistoryUpdate에서 걸러진다.
+    handleHistoryUpdate(currentDate, totalWater, studyMinutes);
+  }, [currentUser, currentDate, statsDate, stats.waterMl, totalStudyMin, handleHistoryUpdate]);
 
   // ─────────────────────────────────────────────
   // localStorage 동기화
