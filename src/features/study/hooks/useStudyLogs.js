@@ -61,7 +61,6 @@ export const useStudyLogs = (currentDate, onLogsLoaded) => {
         description: log.description || "",
         purpose: log.purpose || "study",
 
-        sourceFile: log.source_file || "",
         sourceFile: log.source_file || log.sourceFile || "",
         category: log.category || "lecture",
 
@@ -263,7 +262,8 @@ const handleUpdateBookInfo = useCallback(async (log, updates) => {
   try {
     const payload = {
       source_file: log.sourceFile,   // csv 파일
-      log_id: 0,                     // 책 정보는 파일 전체 업데이트 → 0으로 고정
+      // 책 정보는 파일 전체 업데이트 → log_id는 "all"로 명시
+      log_id: "all",
       updates: {
         book_id: updates.bookId,
         book_title: updates.bookTitle,
@@ -292,6 +292,69 @@ const handleUpdateBookInfo = useCallback(async (log, updates) => {
   }
 }, [loadStudyLogs]);
 
+  // 5. Laptop 로그 수동 수정 (활동 분류/메모 등)
+  // - 서버 CSV(`/api/logs/update`) 저장 + 프론트 상태 동기화
+  const handleManualLogUpdate = useCallback(async (logId, updatesOrUserLabel) => {
+    const targetLog = studyLogs.find(l => l.id === logId);
+    if (!targetLog?.sourceFile) {
+      console.warn("[Study] Missing sourceFile for log:", logId);
+      return;
+    }
+
+    const updates =
+      typeof updatesOrUserLabel === 'string'
+        ? { userLabel: updatesOrUserLabel }
+        : (updatesOrUserLabel || {});
+
+    const nextCategory = updates.category ?? targetLog.category ?? 'lecture';
+    const nextUserLabel = String(updates.userLabel ?? updates.manualLabel ?? nextCategory);
+
+    // optimistic update (UI 즉시 반영)
+    setStudyLogs(prev =>
+      prev.map(l => {
+        if (l.id !== logId) return l;
+        return {
+          ...l,
+          category: nextCategory,
+          userLabel: nextUserLabel,
+          subject: updates.subject ?? l.subject,
+          note: updates.note ?? l.note,
+          durationMin:
+            updates.durationMin !== undefined && updates.durationMin !== null
+              ? updates.durationMin
+              : l.durationMin,
+        };
+      })
+    );
+
+    try {
+      const payload = {
+        source_file: targetLog.sourceFile,
+        log_id: logId,
+        updates: {
+          category: nextCategory,
+          manual_label: nextUserLabel,
+          subject: updates.subject,
+          note: updates.note,
+          duration_min: updates.durationMin,
+        },
+      };
+
+      const response = await fetch(`${API_BASE_URL}/api/logs/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) throw new Error('update failed');
+
+      // 서버 저장 이후 재로딩으로 세션/집계 일관성 확보
+      await loadStudyLogs(currentDateRef.current);
+    } catch (err) {
+      console.error('Laptop log update failed:', err);
+    }
+  }, [studyLogs, loadStudyLogs]);
+
 
 
   // ─────────────────────────────────────────────
@@ -310,6 +373,7 @@ const handleUpdateBookInfo = useCallback(async (log, updates) => {
     loadStudyLogs,
     fetchStudySummary,
     handleUpdateBookInfo,
+    handleManualLogUpdate,
     handleImageAnalysis,  // ★ 추가
 
     studySummaryText,

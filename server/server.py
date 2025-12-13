@@ -258,7 +258,9 @@ def get_study_logs(date_str: str):
             return {"logs": [], "totalBookMin": 0, "totalLaptopMin": 0, "sessions": []}
 
         # duration_sec → duration_min (없으면 생성)
-        if 'duration_sec' in df.columns and 'duration_min' not in df.columns:
+        # duration_sec → duration_min 동기화
+        # - CSV에서 duration_sec를 수정하면 항상 duration_min도 함께 업데이트되도록 처리
+        if 'duration_sec' in df.columns:
             df['duration_min'] = pd.to_numeric(df['duration_sec'], errors='coerce').fillna(0) / 60.0
 
         book_min, book_count, book_sessions = calculate_study_duration_per_file(df, 'book')
@@ -382,7 +384,9 @@ def update_log_generic(payload: LogUpdateRequest):
         }
 
         updates = payload.updates or {}
-        is_file_wide_update = str(payload.log_id) in ("0", "all", "")
+        # 파일 전체 업데이트는 명시적으로 "all" 또는 빈 값일 때만 처리
+        # (0 은 실제 첫 번째 로그 인덱스로 사용)
+        is_file_wide_update = str(payload.log_id) in ("all", "")
 
         # 4. 업데이트 적용
         for key, value in updates.items():

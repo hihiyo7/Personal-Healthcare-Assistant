@@ -5,7 +5,7 @@
 // - 카테고리: YouTube, Game (비공부) - 회색
 // ============================================================
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Laptop, Check, Clock, FileText } from 'lucide-react';
 import { LAPTOP_CATEGORIES, isStudyCategory, formatMinutesToTime } from '../utils/studyCalculator';
 
@@ -22,6 +22,16 @@ export default function LaptopModal({ isOpen, log, onSave, onClose, isDarkMode }
   const inputStyle = isDarkMode ? 'bg-slate-900 border-slate-600 text-white placeholder:text-slate-500' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400';
   const cardBg = isDarkMode ? 'bg-slate-700/50' : 'bg-slate-50';
 
+  // 모달이 다른 로그로 열릴 때 state가 이전 값으로 남는 문제 방지
+  useEffect(() => {
+    if (!isOpen) return;
+    setCategory(log?.category || 'lecture');
+    setSubject(log?.subject || '');
+    setNote(log?.note || '');
+    setDurationMin(log?.durationMin || 0);
+    setManualDuration(false);
+  }, [isOpen, log?.id]);
+
   if (!isOpen) return null;
 
   const studyCategories = Object.entries(LAPTOP_CATEGORIES).filter(([, v]) => v.isStudy);
@@ -35,8 +45,9 @@ export default function LaptopModal({ isOpen, log, onSave, onClose, isDarkMode }
   };
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className={`relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-3xl shadow-2xl ${modalBg}`} onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 overflow-y-auto" onClick={onClose}>
+      <div className="min-h-full flex items-start justify-center p-4">
+        <div className={`relative w-full max-w-lg my-8 max-h-[90vh] overflow-y-auto rounded-3xl shadow-2xl ${modalBg}`} onClick={e => e.stopPropagation()}>
         {/* 헤더 */}
         <div className={`sticky top-0 z-10 p-6 pb-4 border-b ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-slate-100 bg-white'}`}>
           <div className="flex items-center justify-between">
@@ -161,6 +172,7 @@ export default function LaptopModal({ isOpen, log, onSave, onClose, isDarkMode }
             <button onClick={onClose} className={`flex-1 py-3 rounded-xl font-semibold transition ${isDarkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>취소</button>
             <button onClick={handleSave} className={`flex-1 py-3 rounded-xl font-semibold text-white transition ${isStudy ? 'bg-amber-500 hover:bg-amber-600' : 'bg-slate-500 hover:bg-slate-600'}`}>저장</button>
           </div>
+        </div>
         </div>
       </div>
     </div>

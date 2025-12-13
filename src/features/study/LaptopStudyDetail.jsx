@@ -224,16 +224,30 @@ export default function LaptopStudyDetail({ logs = [], onUpdateLog, onImageAnaly
 
   // 도넛 차트 데이터
   const categoryData = useMemo(() => {
-    const map = {};
+    let studyTotal = 0;
+    let nonStudyTotal = 0;
+
     sessions.forEach(session => {
-      const key = session.category || 'other';
-      map[key] = (map[key] || 0) + session.durationMin;
+      if (session.isStudy) studyTotal += session.durationMin;
+      else nonStudyTotal += session.durationMin;
     });
-    return Object.entries(map).map(([key, value]) => ({
-      name: LAPTOP_CATEGORIES[key]?.label || key,
-      value: parseFloat(value.toFixed(1)),
-      isStudy: isStudyCategory(key)
-    }));
+
+    const data = [];
+    if (studyTotal > 0) {
+      data.push({
+        name: '공부',
+        value: parseFloat(studyTotal.toFixed(1)),
+        isStudy: true,
+      });
+    }
+    if (nonStudyTotal > 0) {
+      data.push({
+        name: '기타',
+        value: parseFloat(nonStudyTotal.toFixed(1)),
+        isStudy: false,
+      });
+    }
+    return data;
   }, [sessions]);
 
   const getFilterBtnStyle = (f) => {
@@ -275,14 +289,25 @@ export default function LaptopStudyDetail({ logs = [], onUpdateLog, onImageAnaly
         const session = sessions.find(s => s.id === selectedLog.sessionId);
         if (session) {
             session.logs.forEach(log => {
-                const newUserLabel = updates.userLabel || (updates.category === 'game' ? 'Game' : 'Study');
-                onUpdateLog(log.id, newUserLabel);
+                const userLabel = updates.userLabel || updates.category || 'lecture';
+                onUpdateLog(log.id, {
+                  category: updates.category,
+                  userLabel,
+                  subject: updates.subject,
+                  note: updates.note,
+                });
             });
         }
       } else {
-        const newUserLabel = updates.userLabel || updates.aiResult;
+        const userLabel = updates.userLabel || updates.category || 'lecture';
         // 개별 로그 수정 시 시간/양도 업데이트 (필요 시)
-        onUpdateLog(selectedLog.id, newUserLabel, updates.time, updates.amount); 
+        onUpdateLog(selectedLog.id, {
+          category: updates.category,
+          userLabel,
+          subject: updates.subject,
+          note: updates.note,
+          durationMin: updates.durationMin,
+        }); 
       }
     }
     setShowModal(false);
